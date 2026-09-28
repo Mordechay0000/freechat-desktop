@@ -1,0 +1,210 @@
+# הקליינט לדסקטופ
+
+פורק של **Telegram Desktop** (C++/Qt), GPL-3.0, מ-`owpengram-desktop-client`
+המוצמד ל-`d5a262f`. אותה שיטת overlay כמו באנדרואיד: קובץ חדש + hooks של שורה.
+
+## שתי אסימטריות מול אנדרואיד — שתיהן אומתו בקוד
+
+**1. הדומיין עובד ישירות.** הטרנספורט עובר ב-
+`QTcpSocket::connectToHost(const QString&, int)`
+(`mtproto/details/mtproto_tcp_socket.cpp:54`), ו-Qt פותר שמות מתחם בעצמו.
+באנדרואיד השכבה הנייטיבית משתמשת ב-`inet_pton` שלא פותר DNS, ולכן שם מוטמע IP
+והדומיין נפתר ב-Java. כאן **אין צורך ב-resolver, אין cache, ושינוי IP של השרת
+לא דורש בנייה מחדש** — ה-DNS מטפל בזה.
+
+**2. תעודות עובדות בלי שורת קוד.** אין `QSslConfiguration`, `setCaCertificates`
+או `addCaCertificate` באף מקום בעץ, וה-`.pem` היחיד הוא מפתח חתימת העדכונים ולא
+מחסן CA. כלומר ברירת המחדל של Qt חלה, והיא **מחסן התעודות של מערכת ההפעלה**.
+תעודה שמותקנת במחשב נסמכת אוטומטית.
+
+זה ההיפך מאנדרואיד, שם הפלטפורמה מתעלמת במכוון מתעודות שהמשתמש התקין ולכן היה
+צריך `network_security_config`.
+
+> **שים לב:** זה מחסן ה-OS. אם תתקין CA רק ב-Firefox — לו יש מחסן NSS נפרד —
+> הדסקטופ לא יראה אותו. באובונטו: הקובץ ל-`/usr/local/share/ca-certificates/`
+> ואז `sudo update-ca-certificates`.
+
+## מה ה-overlay עושה
+
+| | |
+|---|---|
+| `freechat/freechat_builtin.h` | header-only. הרשומה המוטמעת של השרת, וסינון הרשימה |
+| hook ב-`ListServers()` | מחליף את הרשימה: FreeChat בלבד + שרתים שהוספת |
+| hook ב-`ServerSelectWidget::activate()` | **עוקף את מסך בחירת השרת** ומצטרף ישר |
+
+ה-header הוא header-only במכוון: הוספת `.cpp` מחייבת עריכה ברשימת המקורות של
+`Telegram/CMakeLists.txt` — עוד קובץ upstream למרג' בכל עדכון.
+
+ה-hook של ה-auto-join יושב **בתוך** `ServerSelectWidget` כדי שיוכל לקרוא ל-
+`proceedJoin()` הפרטי. כך `ApplyServerToAccount`, ה-`ConnectingBox` עם ה-Cancel
+שלו, ההמתנה לחיבור והמסירה לשלב הבא נשארים הקוד הבדוק של upstream.
+hook אחד מכסה גם הפעלה ראשונה (דרך `StartWidget`) וגם הוספת חשבון (דרך
+`EnterPoint::ServerSelect` ב-`window_controller`).
+
+## הניקוי
+
+480 מופעים ב-40 קבצים: `namespace Owpengram`, מודול השרתים ושלושת ה-boxes,
+מזהה החבילה, 49 מפתחות `lng_`, קבצי ה-JSON, צלילי ההתראה, `Resources/OwpenGram`,
+והסכמה `owpg://`. מפתח ה-RSA וה-IP של הצומת שלהם רוקנו. רשומות המקורות
+ב-`CMakeLists.txt` עודכנו בהתאם.
+
+`scripts/lib/purge_branding_desktop.py` יוצא בשגיאה אם נשאר מופע אחד או נתיב
+אחד בשם שלהם — במקום לדווח הצלחה על שינוי שם חצי-גמור.
+
+## בנייה — שלוש הפלטפורמות
+
+הקליינט לדסקטופ נבנה ורץ על **לינוקס, macOS ו-Windows**. השרת לא — הוא לינוקס
+בלבד, במכוון (`scripts/install-service.sh` מסרב על שתי האחרות ומפנה לחלופה).
+
+### מה צריך להתקין, לפי מערכת
+
+| | לינוקס | macOS | Windows |
+|---|---|---|---|
+| קומפיילר | מסופק בקונטיינר של upstream | **Xcode מלא**, לא רק CLT | Visual Studio 2022/2026 + toolset **14.44** |
+| git | חבילת המערכת | `xcode-select --install` | [Git for Windows](https://git-scm.com/download/win) |
+| bash | יש | יש | **Git for Windows** — ראה למטה |
+| Python 3 | חבילת המערכת | מגיע עם CLT | python.org, לסמן "Add to PATH" |
+| נוסף | `docker`, `poetry` | `brew` | — |
+| דיסק | ~60GB | ~60GB | ~60GB |
+
+### שלב מקדים משותף — וההערה שחייבת להיאמר על Windows
+
+```bash
+./scripts/bootstrap.sh desktop --with-submodules   # עשרות GB
+./scripts/apply-overlay.sh desktop
+```
+
+**שני אלה הם bash, וגם ב-Windows מריצים אותם ב-bash — מתוך "Git Bash".** אין
+להם מקבילה ב-PowerShell, וזו החלטה: הם אותו קוד בשלוש המערכות, ומימוש שני היה
+סט באגים שני. Git for Windows מספק את ה-bash שמריץ אותם, וממילא צריך אותו
+לבנייית Telegram Desktop.
+
+**לא WSL בשלב הזה.** checkout תחת WSL לא רואה את התקנת Visual Studio שלך,
+והבנייה צריכה MSVC בצד של Windows.
+
+`scripts\build-desktop.ps1` בודק שיש `bash` ו-Python 3 עובד לפני שהוא מתחיל,
+כי הודעות השגיאה שלו עצמו מפנות אותך להריץ `bash scripts/...` — וזו הוראה מבלבלת
+לקבל במכונה שאין בה bash.
+
+### `python3` לא קיים ב-Windows, וזה כבר מטופל
+
+`apply-overlay.sh` קורא ל-Python **30 פעם**, והתקנה סטנדרטית מ-python.org
+מספקת `python.exe` ו-`py.exe` ולא `python3`. כלומר כל 30 הקריאות נכשלו שם,
+ו-`build-desktop.ps1` בדק `python` בעוד הסקריפט שהוא מפנה אליו דרש `python3` —
+השניים לא הסכימו והמסלול נשבר בשלב השני.
+
+`scripts/lib/portable.sh` פותר את השם בזמן ריצה — `python3`, אחר כך `python`,
+אחר כך `py -3` — ו**שואל את המפרש מה הגרסה שלו** במקום להסיק מהשם, כי `python`
+שהוא Python 2 גרוע מהיעדר python: הוא רץ ואז נכשל בתוך סקריפט.
+
+### `api_id` / `api_hash` — לא צריך להירשם
+
+`configure` דורש את שניהם בכל שלוש הפלטפורמות. **gramsrv לא מאמת אותם** —
+`internal/rpc/auth.go:874` אומר במפורש שאין רישום אפליקציות והערכים רק נזכרים
+לטלמטריה. לכן הערכים שב-`freechat.env` מספיקים לצומת פרטי, ואין
+עניין עם my.telegram.org.
+
+### לינוקס — דרך Docker
+
+upstream בונה לינוקס **בתוך קונטיינר משלו**, לא בשרשרת הכלים של המכונה:
+
+```bash
+./scripts/build-desktop.sh prepare     # בונה את הדימוי tdesktop:centos_env. שעות
+./scripts/build-desktop.sh build
+```
+
+דורש `docker` ו-`poetry`.
+
+### macOS
+
+```bash
+./scripts/build-desktop.sh prepare     # brew + xcode-select + prepare/mac.sh
+./scripts/build-desktop.sh configure
+./scripts/build-desktop.sh build
+```
+
+דורש **Xcode מלא**, לא רק command line tools. הבנייה עוברת דרך
+`cmake --build`, כך שהיא עובדת בין אם `configure.sh` בחר Xcode או ninja, ובלי
+לפתוח את ה-GUI. לחלופין: `out/Telegram.xcodeproj` ב-Xcode.
+
+### Windows
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage prepare
+powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage configure -Arch x64
+powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage build
+```
+
+**המכשלה שתופסת כל אחד:** הפקודות חייבות לרוץ בטרמינל שבו אותחלה סביבת
+Visual Studio **עם ה-toolset הישן**. ברירת המחדל של VS 2026 היא `v145` שלא
+תומך ב-Windows 7, ש-Telegram Desktop עוד מכוון אליו — ולכן upstream דורש
+`-vcvars_ver=14.44`:
+
+```bat
+%comspec% /k "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=14.44
+```
+
+הסקריפט בודק `$env:VSINSTALLDIR` ומסרב אם הסביבה לא אותחלה, כי בלעדיה
+`prepare\win.bat` ו-`configure.bat` נכשלים בלי להזכיר את הסיבה.
+דורש גם Git ו-Python 3.10 ב-PATH.
+
+## הרצה — מה שתופגש בו בכל מערכת
+
+| | איפה הבינארי | מה חוסם בהרצה ראשונה |
+|---|---|---|
+| לינוקס | `desktop/upstream/out/` | כלום |
+| macOS | `desktop/upstream/out/` (או `out/Telegram.xcodeproj` ב-Xcode) | **Gatekeeper** — בנייה לא חתומה |
+| Windows | `desktop/upstream/out/Release/` | **SmartScreen** — בינארי לא מוכר |
+
+**macOS:** בנייה מקומית לא חתומה ב-Developer ID, ולכן לחיצה כפולה תיחסם. פתיחה
+ראשונה: קליק ימני → Open → Open, או `xattr -dr com.apple.quarantine <path>.app`.
+זו התנהגות של המערכת, לא באג בבנייה.
+
+**Windows:** SmartScreen יציג "Windows protected your PC" — More info → Run anyway.
+נעלם אם תחתום את הבינארי בתעודה משלך.
+
+**תעודות אבטחה — עובד בשלושתן בלי שורת קוד.** אין `QSslConfiguration` ואין
+`setCaCertificates` באף מקום בעץ, כלומר ברירת המחדל של Qt, שהיא מחסן התעודות של
+מערכת ההפעלה: Keychain ב-macOS, Certificate Store ב-Windows, ה-CA bundle של
+המערכת בלינוקס. תעודה שהתקנת במחשב נסמכת אוטומטית.
+
+**וזה לא נוגע ל-MTProto בכלל.** ההצפנה שם היא AES-IGE עם מפתח ה-RSA של השרת
+(`freechat.env` → `FREECHAT_SERVER_RSA_PUB`), בלי תעודות ובלי TLS. התעודות משנות
+רק ל-HTTPS שהאפליקציה עושה בצד.
+
+## מה לא אומת, במפורש
+
+**אף אחת משלוש הבנייות לא הורצה מקצה לקצה.** `prepare/*` מקמפל Qt, FFmpeg
+ו-OpenSSL — עשרות GB מול 11GB שהיו פנויים בסביבה שבה נכתב הקוד. לכן ה-overlay
+אומת בקריאת קוד, והסקריפטים בקריאת התיעוד של upstream.
+
+**מה כן אומת:** `apply-overlay.sh desktop` רץ בהצלחה, גזר את הכתובת נכון
+(`freechat.forum-dev.com:8080` — hostname, בניגוד לאנדרואיד), ועובר דרך כל 30
+קריאות ה-Python בפותר השמות. אידמפוטנטיות שלושת ה-overlays מאומתת ב-selftest.
+
+**`build-desktop.ps1`: מתפרסר נקי ב-PowerShell 7.4.6** (ה-parser של PowerShell
+עצמו, 0 שגיאות), ושני הבלוקים הלוגיים שלו — קריאת `freechat.env` וזיהוי Python —
+**הורצו** בשלושה מצבים: `python3` קיים, רק `py -3` (התקנת python.org), ובלי Python
+בכלל. מה שלא נבדק: החלקים שתלויים בנתיבי Windows וב-Visual Studio, שלא ניתנים
+להרצה על לינוקס. `selftest.sh` מפרסר כל `.ps1` כש-`pwsh` מותקן.
+
+שלושה באגים נמצאו בו בקריאה חוזרת לפני שהיה לו parser בכלל:
+
+1. `$args` הוא משתנה אוטומטי שמור ב-PowerShell — שינוי שם.
+2. הוא בדק `python` בעוד `apply-overlay.sh` דרש `python3`, שלא קיים ב-Windows.
+3. הוא הפנה להריץ `bash scripts/...` בלי לבדוק שיש bash בכלל.
+
+### סקריפטי ה-bash: מה נבדק בכל מערכת
+
+| | איך נבדק | תוצאה |
+|---|---|---|
+| לינוקס | הרצה ישירה | selftest מלא עובר |
+| macOS | **bash 3.2.57 אמיתי** (זה ה-`/bin/bash` של מק) + PATH בלי `sha256sum` ובלי `timeout` | selftest מלא עובר |
+| Windows | `uname` שמדווח `MINGW64_NT` + PATH בלי `python3` — פעם עם `python`, פעם רק עם `py -3` | selftest מלא עובר |
+
+מה שלא ניתן לדמות כאן: הסמנטיקה של `sed` ו-`grep` של BSD, ו-MSYS עצמו. את
+הראשון כיסתה סריקה (שני ביטויים שעבדו רק ב-GNU תוקנו); את השני — אתה, בהרצה
+הראשונה.
+
+כשל ראשון הוא כנראה פער בשרשרת הכלים או שגיאת כתיב בסקריפט, ולא overlay שבור.
+ההוראות המחייבות הן של upstream: `desktop/upstream/docs/building-{linux,mac,win}.md`.

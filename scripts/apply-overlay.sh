@@ -1,0 +1,303 @@
+#!/usr/bin/env bash
+# Pour FreeChat's overlay onto the pinned upstream checkouts.
+#
+#   ./scripts/apply-overlay.sh [all|<component>]
+#
+# Idempotent: safe to re-run after a bootstrap, an upstream bump, or a partial
+# failure. Every change is either a new file (no merge cost) or a single-line
+# hook applied through scripts/lib/hook.py, which refuses to guess.
+set -euo pipefail
+
+# Cross-platform helpers (sha256, timeout, stat, OS detection). Linux, macOS and
+# Windows-under-Git-Bash disagree on commands these scripts rely on, and a
+# missing one is not a degraded result -- it is a script that stops.
+# shellcheck source=lib/portable.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/portable.sh"
+
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Safe KEY=VALUE loading. Sourcing a config file executes it; see the header of
+# scripts/lib/load_env.sh for the hang that caused.
+# shellcheck source=lib/load_env.sh
+. "$ROOT/scripts/lib/load_env.sh"
+
+HOOK="$ROOT/scripts/lib/hook.py"
+
+log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
+die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+
+# The components this repository holds. A split repository holds one.
+TARGETS="desktop"
+
+# Validated, not taken on trust. `ONLY="\${1:-all}"` accepted anything: a typo
+# or a stray flag matched no component, applied nothing, and still printed
+# "done" -- the same silent no-op that made bootstrap.sh report success after
+# fetching nothing.
+ONLY=all
+for arg in "$@"; do
+  case "$arg" in
+    -h|--help)
+      printf 'usage: ./scripts/apply-overlay.sh [all|%s]\n' "${TARGETS// /|}"; exit 0 ;;
+    -*) die "unknown option: $arg (usage: ./scripts/apply-overlay.sh [all|${TARGETS// /|}])" ;;
+    *)
+      if [[ "$arg" == all || " $TARGETS " == *" $arg "* ]]; then
+        ONLY="$arg"
+      else
+        die "unknown component: $arg (this repository has: $TARGETS)"
+      fi ;;
+  esac
+done
+wants() { [[ "$ONLY" == all || "$ONLY" == "$1" ]]; }
+
+# reset_upstream <upstream-dir> <checkout-paths...> -- <clean-paths...>
+#
+# Restores the pinned tree and deletes everything a previous run added, so every
+# apply starts from the same state. Not a nicety: the purge renames the
+# identifiers the hooks anchor on, and an overlay file this repo no longer ships
+# would otherwise keep being compiled forever.
+#
+# Both halves are scoped to SOURCE paths, never the whole tree. Build output
+# (TMessagesProj/.cxx, */build, out/) and things that cannot be recreated
+# (local.properties, TMessagesProj/config/release.keystore, server .env, the
+# server's data/ with its RSA key and blobs) all live outside them. A blanket
+# `git clean -fd` here would cost 3.7GB of native objects and a 40-minute
+# rebuild, or the server's identity key.
+reset_upstream() {
+  local up=$1; shift
+  [[ -d "$up/.git" ]] || return 0
+
+  local checkout=() clean=() seen_sep=0 arg
+  for arg in "$@"; do
+    if [[ "$arg" == -- ]]; then seen_sep=1; continue; fi
+    if [[ "$seen_sep" == 0 ]]; then checkout+=("$arg"); else clean+=("$arg"); fi
+  done
+
+  # Pass only paths that exist: git fails the whole invocation on an unknown
+  # pathspec, which would silently skip the reset entirely.
+  local present=() p
+  for p in "${checkout[@]}"; do [[ -e "$up/$p" ]] && present+=("$p"); done
+  [[ ${#present[@]} -gt 0 ]] && git -C "$up" checkout --force -q -- "${present[@]}" 2>/dev/null || true
+
+  present=()
+  for p in "${clean[@]}"; do [[ -e "$up/$p" ]] && present+=("$p"); done
+  [[ ${#present[@]} -gt 0 ]] && git -C "$up" clean -fdq -- "${present[@]}" 2>/dev/null || true
+}
+
+# copy_overlay <overlay-root> <upstream-root>
+# Mirrors the overlay tree in, excluding nothing: paths are chosen to collide
+# with no upstream file, so a clobber means the overlay needs renaming.
+copy_overlay() {
+  local src=$1 dst=$2 rel
+  [[ -d "$src" ]] || return 0
+  while IFS= read -r -d '' file; do
+    rel="${file#"$src"/}"
+    # The overlay root's README documents the overlay itself; it is not a file
+    # to pour into the upstream tree.
+    [[ "$rel" == "README.md" ]] && continue
+    mkdir -p "$dst/$(dirname "$rel")"
+    cp "$file" "$dst/$rel"
+    printf '  + %s\n' "$rel"
+  done < <(find "$src" -type f -print0)
+}
+
+# Load freechat.env and map it onto the BRAND_* names the platform functions use.
+#
+# One file, FREECHAT_* names, identical across the three repositories, so a value
+# that means the same thing in two of them is spelled the same in both and a
+# single shared env can drive all three. It replaces android/branding/brand.env
+# and desktop/branding/brand.env, which held the same information twice.
+#
+# The address is DERIVED here rather than configured, in the form each platform
+# requires, and that is the point of the change rather than a side effect:
+#
+#   android  a numeric IP, because the native transport uses inet_pton and does
+#            not resolve names -- given a hostname it closes the socket before
+#            connect() and logs nothing in a release build
+#   desktop  the domain, because Qt's connectToHost resolves names itself, so a
+#            changed server address needs no rebuild there at all
+#
+# Held as two hand-written strings they could disagree, and a wrong one produced
+# a login that spun forever with no socket and nothing in the server log.
+load_branding() {
+  local platform=$1 env_file="$ROOT/freechat.env"
+  [[ -f "$env_file" ]] || env_file="$ROOT/freechat.env.example"
+  [[ -f "$env_file" ]] || die "no freechat.env or freechat.env.example at $ROOT"
+
+  # Parsed, never sourced. `. "$env_file"` would RUN the file: the line
+  # FREECHAT_SERVER_DESCRIPTION=Private node then means "run the command node",
+  # which with node installed is a REPL waiting on stdin -- this script hung on
+  # it for 13 minutes with no output. Whether it hangs depends on what stdin
+  # happens to be, so it passes when tested and blocks in real use.
+  load_env_file "$env_file" || die "$platform: cannot read ${env_file#$ROOT/}"
+  log "$platform: config <- ${env_file#$ROOT/}"
+
+  : "${FREECHAT_SERVER_PORT:?FREECHAT_SERVER_PORT missing from ${env_file#$ROOT/}}"
+  : "${FREECHAT_SERVER_IP:?FREECHAT_SERVER_IP missing from ${env_file#$ROOT/}}"
+
+  BRAND_NAME="${FREECHAT_APP_NAME:?FREECHAT_APP_NAME missing}"
+  BRAND_PACKAGE="${FREECHAT_ANDROID_PACKAGE:-}"
+  BRAND_SERVER_DOMAIN="${FREECHAT_SERVER_DOMAIN:-}"
+  BRAND_SERVER_DC="${FREECHAT_SERVER_DC:-2}"
+  BRAND_SERVER_DESCRIPTION="${FREECHAT_SERVER_DESCRIPTION:-}"
+  BRAND_INCLUDE_TELEGRAM="${FREECHAT_INCLUDE_TELEGRAM:-false}"
+  # Not configurable any more. The upstream fork's own nodes are gone from both
+  # clients, and a switch to put them back is a switch to reintroduce the bug
+  # where the client holds a session on someone else's server.
+  BRAND_INCLUDE_OWPENGRAM=false
+  BRAND_AUTO_JOIN="${FREECHAT_AUTO_JOIN:-true}"
+  BRAND_API_ID="${FREECHAT_API_ID:-}"
+  BRAND_API_HASH="${FREECHAT_API_HASH:-}"
+
+  case "$platform" in
+    android)
+      BRAND_SERVER_ADDRESS="$FREECHAT_SERVER_IP:$FREECHAT_SERVER_PORT"
+      BRAND_SERVER_RSA_PUB="${FREECHAT_SERVER_RSA_PUB:+android/$FREECHAT_SERVER_RSA_PUB}"
+      ;;
+    desktop)
+      # The domain when there is one, the IP otherwise -- Qt accepts either.
+      BRAND_SERVER_ADDRESS="${FREECHAT_SERVER_DOMAIN:-$FREECHAT_SERVER_IP}:$FREECHAT_SERVER_PORT"
+      BRAND_SERVER_RSA_PUB="${FREECHAT_SERVER_RSA_PUB:-}"
+      ;;
+  esac
+
+  if [[ -n "$BRAND_SERVER_RSA_PUB" ]]; then
+    local key="$ROOT/$BRAND_SERVER_RSA_PUB"
+    [[ "$platform" == desktop ]] && key="$ROOT/desktop/$BRAND_SERVER_RSA_PUB"
+    # Fail loudly. A missing key is not a degraded build: with the picker gone
+    # there is no runtime path to supply one, so the client cannot handshake at
+    # all. The published desktop repository shipped in exactly that state,
+    # because its branding pointed at ../android/branding/server-rsa.pub, a path
+    # that exists only when both platforms live under one tree.
+    [[ -f "$key" ]] || die "$platform: FREECHAT_SERVER_RSA_PUB points at $BRAND_SERVER_RSA_PUB,
+      which does not exist ($key).
+      Each repository carries its own copy of the node's public key. Fetch it:
+        curl -s http://\$FREECHAT_SERVER_DOMAIN:\$FREECHAT_SERVER_PORT/freechat/server-info \\
+          | jq -r .rsa_public_key_pem > $BRAND_SERVER_RSA_PUB"
+  fi
+}
+
+apply_desktop() {
+  local up="$ROOT/desktop/upstream"
+  [[ -d "$up/Telegram/SourceFiles" ]] || die "desktop upstream missing — run ./scripts/bootstrap.sh desktop"
+
+  # Same reason as android: the purge renames the identifiers the hooks anchor
+  # on, so a second run needs a clean tree. Tracked paths only -- never a blanket
+  # clean, which would take the third-party build output with it.
+  # checkout alone is not enough: the purge RENAMES tracked files, so restoring
+  # them leaves the renamed copies behind untracked and both names end up in the
+  # tree -- which the purge's own leftover check then fails on, correctly.
+  log "desktop: resetting upstream to the pinned tree"
+  reset_upstream "$up" Telegram -- Telegram/SourceFiles Telegram/Resources
+
+  log "desktop: overlay files"
+  copy_overlay "$ROOT/desktop/overlay" "$up"
+
+  load_branding desktop
+  log "desktop: branding -> $BRAND_NAME @ $BRAND_SERVER_ADDRESS"
+
+  local header="$up/Telegram/SourceFiles/freechat/freechat_builtin.h"
+  py_run - "$header" "$BRAND_NAME" "${BRAND_SERVER_DESCRIPTION:-}" \
+    "$BRAND_SERVER_ADDRESS" "${BRAND_SERVER_DC:-2}" \
+    "${BRAND_AUTO_JOIN:-true}" "${BRAND_INCLUDE_TELEGRAM:-false}" \
+    "${BRAND_INCLUDE_OWPENGRAM:-false}" \
+    "${BRAND_SERVER_RSA_PUB:+$ROOT/desktop/$BRAND_SERVER_RSA_PUB}" <<'PY7'
+import os, re, sys
+
+(path, name, desc, addr, dc, auto, inc_tg, inc_up, keypath) = (sys.argv + [""])[1:10]
+text = open(path, encoding="utf-8").read()
+truthy = {"1", "true", "yes", "on"}
+
+
+def put(const, value):
+    global text
+    pat = r'(inline constexpr auto ' + const + r' = )[^;]*(;)'
+    new, n = re.subn(pat, lambda m: m.group(1) + value + m.group(2), text, count=1)
+    if n != 1:
+        sys.exit(f"branding: {const} not found in {path}")
+    text = new
+
+
+# A hostname is fine here: Qt's connectToHost resolves it. Only the port has to
+# be split off, and it has to be a number.
+if ":" not in addr:
+    sys.exit(f"branding: BRAND_SERVER_ADDRESS {addr!r} must be host:port")
+host, _, port = addr.rpartition(":")
+if not port.isdigit():
+    sys.exit(f"branding: port {port!r} in BRAND_SERVER_ADDRESS is not a number")
+
+put("kServerHost", f'"{host}"')
+put("kServerPort", port)
+put("kServerName", f'"{name}"')
+put("kServerDescription", f'"{desc}"')
+put("kServerDc", str(int(dc)))
+put("kServerId", f'"{name.lower()}"')
+put("kAutoJoin", "true" if auto.strip().lower() in truthy else "false")
+put("kIncludeTelegram", "true" if inc_tg.strip().lower() in truthy else "false")
+put("kIncludeUpstreamPublic", "true" if inc_up.strip().lower() in truthy else "false")
+
+pem = ""
+if keypath and os.path.isfile(keypath):
+    raw = open(keypath, encoding="utf-8").read().strip()
+    if "BEGIN RSA PUBLIC KEY" not in raw:
+        sys.exit(f"branding: {keypath} is not a PKCS#1 'RSA PUBLIC KEY' PEM block")
+    pem = raw.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + "\\n"
+put("kServerRsaPublicKey", f'"{pem}"')
+
+open(path, "w", encoding="utf-8").write(text)
+print(f"  + built-in server {name} @ {host}:{port} dc={dc} "
+      f"rsa={'embedded' if pem else 'none'}")
+print(f"  + auto-join={auto} keep telegram={inc_tg} upstream={inc_up}")
+PY7
+
+  log "desktop: hooks"
+  # Filter the compiled-in entries out of the picker's list.
+  py_run "$HOOK" "$up/Telegram/SourceFiles/owpengram/owpengram_servers.cpp" \
+    '#include "owpengram/owpengram_servers.h"' \
+    '#include "owpengram/owpengram_servers.h"
+
+#include "freechat/freechat_builtin.h"'
+  py_run "$HOOK" "$up/Telegram/SourceFiles/owpengram/owpengram_servers.cpp" \
+    '	for (const auto &custom : ReadCustomServers()) {
+		result.push_back(custom);
+	}
+	return result;' \
+    '	for (const auto &custom : ReadCustomServers()) {
+		result.push_back(custom);
+	}
+	return FreeChatBuiltin::AdjustServerList(std::move(result));'
+
+  # Bypass the picker. Inserted INSIDE ServerSelectWidget so it can call that
+  # class's private proceedJoin() -- the same path clicking a server takes, so
+  # ApplyServerToAccount, the ConnectingBox with its Cancel, the connection wait
+  # and the hand-off to the next step all stay upstream's tested code.
+  py_run "$HOOK" "$up/Telegram/SourceFiles/intro/intro_server_select.cpp" \
+    '#include "intro/intro_server_select.h"' \
+    '#include "intro/intro_server_select.h"
+
+#include "freechat/freechat_builtin.h"'
+  py_run "$HOOK" "$up/Telegram/SourceFiles/intro/intro_server_select.cpp" \
+    'void ServerSelectWidget::activate() {
+	Step::activate();' \
+    'void ServerSelectWidget::activate() {
+	Step::activate();
+	if (const auto freechatAutoJoin = FreeChatBuiltin::AutoJoinServer()) {
+		proceedJoin(*freechatAutoJoin);
+		return;
+	}'
+
+  log "desktop: purging upstream branding"
+  py_run "$ROOT/scripts/lib/purge_branding_desktop.py" "$up" "$BRAND_NAME" \
+    "$([[ "${BRAND_INCLUDE_TELEGRAM:-false}" =~ ^(1|true|yes|on)$ ]] && echo false || echo true)" \
+    || die "desktop branding purge failed — see the paths above"
+
+  log "desktop: overlay applied"
+}
+
+applied=0
+if wants desktop; then
+  apply_desktop
+  applied=$((applied + 1))
+fi
+(( applied > 0 )) || die "nothing was applied for '$ONLY' (this repository has: $TARGETS)"
+log "done"

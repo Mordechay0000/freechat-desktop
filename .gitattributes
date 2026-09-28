@@ -1,0 +1,33 @@
+# Line endings, pinned per file type, for every checkout on every system.
+#
+# Git for Windows installs with core.autocrlf=true, which checks text files out
+# with CRLF line endings. bash then reads the \r as part of every command:
+#
+#   set: pipefail\r: invalid option name
+#   $'\r': command not found
+#
+# on line 1 of every script, before anything can explain itself. Without this
+# file, a Windows clone of this repository could not run a single script. These
+# rules take precedence over autocrlf, so a Windows checkout is byte-identical to
+# a Linux or macOS one.
+#
+# The upstream checkouts under */upstream are separate repositories with their
+# own .gitattributes and are deliberately left to them: tdesktop, for one, wants
+# CRLF .bat files on Windows, and the Python in scripts/ reads and writes in text
+# mode, which keeps whatever convention a checkout already uses.
+* text=auto eol=lf
+
+# cmd.exe mis-parses LF-only batch files (labels and goto break at buffer
+# boundaries); PowerShell reads either, and CRLF is what Windows editors write.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Never converted, never diffed as text.
+*.png      binary
+*.jpg      binary
+*.webp     binary
+*.jks      binary
+*.keystore binary
+*.apk      binary
+*.aab      binary

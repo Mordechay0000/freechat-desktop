@@ -1,0 +1,36 @@
+# Upstream checkouts — fetched by scripts/bootstrap.sh, never committed.
+/vendor/
+/server/upstream/
+/android/upstream/
+
+# Build output
+/out/
+*.apk
+*.aab
+/bin/
+
+# Local config & secrets — never commit these.
+.env
+*.local
+*.jks
+*.keystore
+api_credentials.local.*
+.freechat-build.local.json
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+
+# FreeChat process env (copied from freechat.vars.example)
+/server/deploy/freechat.vars
+
+# Desktop upstream checkout — fetched by bootstrap.sh, never committed.
+/desktop/upstream/
+
+# Split output — regenerate with scripts/split-repos.sh, never committed here.
+/split/
+
+# Local configuration, copied from freechat.env.example. Never committed:
+# a shared env may hold a Postgres password, and the example is the schema.
+/freechat.env

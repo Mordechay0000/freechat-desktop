@@ -1,0 +1,15 @@
+# FreeChat desktop upstream pin.
+# Read by scripts/bootstrap.sh. Bump with scripts/sync-upstream.sh.
+REPO=https://github.com/owpengram/owpengram-desktop-client.git
+# Fork of Telegram Desktop, GPL-3.0. Mirrors the Android fork's structure:
+# Telegram/SourceFiles/owpengram/owpengram_servers.{cpp,h} holds the same
+# built-in server constants.
+# Full 40-character SHA, always. `git fetch --depth 1 <sha>` cannot resolve an
+# abbreviation against a remote; this pin was once written as d5a262f by hand
+# and no fresh machine could fetch it.
+COMMIT=d5a262f7baa1a80f747b385fd06cc1f5d57dfe63
+BRANCH=main
+# 108MB source, 36 submodules. Building it runs Telegram/build/prepare/linux.sh,
+# which compiles Qt, FFmpeg and OpenSSL from source: tens of GB and hours. Not
+# buildable in the session container, which is why the overlay is verified by
+# inspection and the build happens on your machine.
