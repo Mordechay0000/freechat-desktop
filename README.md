@@ -82,7 +82,7 @@ cp freechat.env.example freechat.env   # ואז לערוך
 מתעדכנים שבועית, וכל שורה שנערוך בתוכם היא קונפליקט מרג' עתידי.
 
 ```
-UPSTREAM        ה-SHA המוצמד
+upstream.pin    ה-SHA המוצמד
 overlay/        קבצים חדשים שנשפכים לתוך העץ של upstream
 branding/       שם, כתובת, מפתחות — נתונים, לא קוד
 upstream/       ב-.gitignore. לא נכנס לריפו

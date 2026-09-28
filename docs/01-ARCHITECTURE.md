@@ -14,11 +14,11 @@
 ```
 freechat/                         ← הריפו הזה. קטן. רק דלתא.
 ├── server/
-│   ├── UPSTREAM                  ← ה-SHA המוצמד של gramsrv
+│   ├── upstream.pin                  ← ה-SHA המוצמד של gramsrv
 │   ├── overlay/                  ← קבצי Go חדשים שנשפכים לתוך העץ של upstream
 │   └── deploy/                   ← docker-compose, .env, systemd
 ├── android/
-│   ├── UPSTREAM                  ← ה-SHA המוצמד של owpengram-android-client
+│   ├── upstream.pin                  ← ה-SHA המוצמד של owpengram-android-client
 │   ├── overlay/                  ← קבצי Java חדשים (מחלקת הדגלים)
 │   └── branding/                 ← שם, אייקונים, מחרוזות
 └── scripts/

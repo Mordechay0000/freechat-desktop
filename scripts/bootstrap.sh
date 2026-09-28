@@ -95,6 +95,17 @@ fetch_pinned() {
   fi
 
   log "$name: fetching ${COMMIT:0:12} from $REPO"
+  # The checkout path must be a directory or absent. This was once a real
+  # collision: the pin file was named UPSTREAM and the checkout upstream/, which
+  # on a case-insensitive filesystem -- the default on macOS (APFS) and Windows
+  # (NTFS) -- are the same path. mkdir then failed with a bare "File exists",
+  # and deleting "upstream" to clear it deleted the pin. The pin is now
+  # upstream.pin; this names the problem if anything else ever sits there.
+  if [[ -e "$dest" && ! -d "$dest" ]]; then
+    die "$dest exists and is not a directory, so the upstream cannot be checked out there.
+      On macOS and Windows file names are case-insensitive by default: a file
+      called ${dest##*/} in any capitalisation occupies this path. Move it aside."
+  fi
   mkdir -p "$dest"
 
   # Test for $dest/.git directly, NOT `git rev-parse --git-dir`: rev-parse walks
@@ -138,7 +149,7 @@ fetch_pinned() {
 # Telegram/build/prepare/*.sh are tens of GB, and the overlay only needs the
 # source tree. Pass --with-submodules when you are actually going to build.
 if wants desktop; then
-  fetch_pinned "desktop" "$ROOT/desktop/upstream" "$ROOT/desktop/UPSTREAM" "$WITH_SUBMODULES"
+  fetch_pinned "desktop" "$ROOT/desktop/upstream" "$ROOT/desktop/upstream.pin" "$WITH_SUBMODULES"
   fetched=$((fetched + 1))
 fi
 

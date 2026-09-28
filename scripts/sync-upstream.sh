@@ -41,7 +41,7 @@ if [[ " $TARGETS " != *" $WHICH "* ]]; then
   exit 2
 fi
 TARGET="${2:-}"
-PIN="$ROOT/$WHICH/UPSTREAM"
+PIN="$ROOT/$WHICH/upstream.pin"
 DEST="$ROOT/$WHICH/upstream"
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }

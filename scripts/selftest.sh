@@ -47,6 +47,26 @@ has() { [[ " $COMPONENTS " == *" $1 "* ]]; }
 # ran these checks is part of what they prove.
 printf '  components: %s\n  bash %s on %s\n\n' "$COMPONENTS" "$BASH_VERSION" "$(host_os)"
 
+# --- no two paths collide on a case-insensitive filesystem ------------------
+# macOS (APFS) and Windows (NTFS) ignore case by default, and Linux does not,
+# so a collision is invisible where this project was developed. It was real:
+# the pin file was named UPSTREAM and the checkout directory upstream/, the same
+# path on a Mac. bootstrap then failed with a bare "mkdir: File exists", and
+# removing "upstream" to clear it deleted the pin. Checked over the tracked
+# files PLUS the paths the scripts create, because the collision was between
+# one of each.
+case_clash="$(
+  { git -C "$ROOT" ls-files 2>/dev/null
+    for c in $COMPONENTS; do printf '%s/upstream\n' "$c"; done
+    printf 'out\nfreechat.env\n'
+  } | awk '{ k = tolower($0); if (k in seen && seen[k] != $0) print seen[k] " <-> " $0; else seen[k] = $0 }'
+)"
+if [[ -z "$case_clash" ]]; then
+  ok "no paths collide on case-insensitive filesystems (macOS, Windows)"
+else
+  bad "paths that are the SAME path on macOS/Windows: $case_clash"
+fi
+
 # --- every pin is a full SHA ------------------------------------------------
 # The desktop pin once read COMMIT=d5a262f. A shallow fetch by commit needs the
 # full id, so no fresh machine could bootstrap the desktop client at all -- and
@@ -54,7 +74,7 @@ printf '  components: %s\n  bash %s on %s\n\n' "$COMPONENTS" "$BASH_VERSION" "$(
 # notice. Checked against the real pin files, not the fake.
 short_pins=""
 for c in $COMPONENTS; do
-  pin_commit="$(sed -n 's/^COMMIT=//p' "$ROOT/$c/UPSTREAM" 2>/dev/null | tr -d '\r' | tail -1)"
+  pin_commit="$(sed -n 's/^COMMIT=//p' "$ROOT/$c/upstream.pin" 2>/dev/null | tr -d '\r' | tail -1)"
   [[ "$pin_commit" =~ ^[0-9a-f]{40}$ ]] || short_pins="$short_pins $c=${pin_commit:-<missing>}"
 done
 if [[ -z "$short_pins" ]]; then
@@ -82,7 +102,7 @@ origin_before="$(git -C "$work" remote get-url origin)"
 # bootstrap with no component, which fetches all of them, and a pin left pointing
 # at GitHub would pull gigabytes into a unit test.
 for c in $COMPONENTS; do
-  cat > "$work/$c/UPSTREAM" <<PIN
+  cat > "$work/$c/upstream.pin" <<PIN
 REPO=$fake
 COMMIT=$fake_sha
 BRANCH=master
