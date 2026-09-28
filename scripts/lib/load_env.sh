@@ -44,13 +44,25 @@ load_env_file() {
     if [[ "$line" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=(.*)$ ]]; then
       key="${BASH_REMATCH[1]}"
       value="${BASH_REMATCH[2]}"
-      # Strip one matched pair of surrounding quotes, then trailing whitespace on
-      # an unquoted value. A quoted value keeps its spaces exactly.
+      # Whitespace off BOTH ends before looking for quotes, so KEY=  'a b'  is
+      # quoted. Trimming only the left kept the quotes inside the value while the
+      # Python and PowerShell readers of the same file dropped them -- the four
+      # parsers disagreed on one line until they were tested side by side.
+      value="${value#"${value%%[![:space:]]*}"}"
+      value="${value%"${value##*[![:space:]]}"}"
+      # A matched pair of quotes: the inside, verbatim -- spaces and # included.
+      # Otherwise: drop an inline comment (whitespace then #), then trailing
+      # whitespace. That is what bash did when these files were sourced, and
+      # people write `KEY=8080 # my port`. Parsing kept the comment IN the value
+      # (FREECHAT_SERVER_PORT became "8080 # my port" and the client's address
+      # "ip:8080 # my port") until this was added. A # with no whitespace before
+      # it is part of the value, as in bash: http://host/#frag stays whole.
       if [[ "$value" == \"*\" && ${#value} -ge 2 ]]; then
         value="${value:1:${#value}-2}"
       elif [[ "$value" == \'*\' && ${#value} -ge 2 ]]; then
         value="${value:1:${#value}-2}"
       else
+        value="${value%%[[:space:]]#*}"
         value="${value%"${value##*[![:space:]]}"}"
       fi
       # export, not eval: the value is data and never re-parsed as shell.
@@ -63,4 +75,30 @@ load_env_file() {
   done < "$file"
 
   return 0
+}
+
+# load_freechat_env <root>  --  freechat.env.example first, freechat.env over it.
+#
+# Layered, not either/or. Previously freechat.env REPLACED the example, so the
+# natural thing -- a freechat.env holding only what you changed, say just the
+# port -- lost every other key and failed with "FREECHAT_SERVER_IP missing".
+# Now the example supplies every default and freechat.env overrides what it
+# names; a complete copy of the example still works exactly as before.
+#
+# Sets FREECHAT_ENV_SOURCES to what was read, for the caller's log line.
+load_freechat_env() {
+  local root=$1
+  FREECHAT_ENV_SOURCES=""
+  if [[ -f "$root/freechat.env.example" ]]; then
+    load_env_file "$root/freechat.env.example" || return 1
+    FREECHAT_ENV_SOURCES="freechat.env.example"
+  fi
+  if [[ -f "$root/freechat.env" ]]; then
+    load_env_file "$root/freechat.env" || return 1
+    FREECHAT_ENV_SOURCES="${FREECHAT_ENV_SOURCES:+$FREECHAT_ENV_SOURCES + }freechat.env"
+  fi
+  if [[ -z "$FREECHAT_ENV_SOURCES" ]]; then
+    printf 'load_freechat_env: no freechat.env or freechat.env.example in %s\n' "$root" >&2
+    return 1
+  fi
 }

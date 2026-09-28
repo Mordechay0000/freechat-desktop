@@ -120,20 +120,18 @@ copy_overlay() {
 # Held as two hand-written strings they could disagree, and a wrong one produced
 # a login that spun forever with no socket and nothing in the server log.
 load_branding() {
-  local platform=$1 env_file="$ROOT/freechat.env"
-  [[ -f "$env_file" ]] || env_file="$ROOT/freechat.env.example"
-  [[ -f "$env_file" ]] || die "no freechat.env or freechat.env.example at $ROOT"
+  local platform=$1
 
   # Parsed, never sourced. `. "$env_file"` would RUN the file: the line
   # FREECHAT_SERVER_DESCRIPTION=Private node then means "run the command node",
   # which with node installed is a REPL waiting on stdin -- this script hung on
   # it for 13 minutes with no output. Whether it hangs depends on what stdin
   # happens to be, so it passes when tested and blocks in real use.
-  load_env_file "$env_file" || die "$platform: cannot read ${env_file#$ROOT/}"
-  log "$platform: config <- ${env_file#$ROOT/}"
+  load_freechat_env "$ROOT" || die "$platform: cannot read the FreeChat configuration"
+  log "$platform: config <- $FREECHAT_ENV_SOURCES"
 
-  : "${FREECHAT_SERVER_PORT:?FREECHAT_SERVER_PORT missing from ${env_file#$ROOT/}}"
-  : "${FREECHAT_SERVER_IP:?FREECHAT_SERVER_IP missing from ${env_file#$ROOT/}}"
+  : "${FREECHAT_SERVER_PORT:?FREECHAT_SERVER_PORT is not set in $FREECHAT_ENV_SOURCES}"
+  : "${FREECHAT_SERVER_IP:?FREECHAT_SERVER_IP is not set in $FREECHAT_ENV_SOURCES}"
 
   BRAND_NAME="${FREECHAT_APP_NAME:?FREECHAT_APP_NAME missing}"
   BRAND_PACKAGE="${FREECHAT_ANDROID_PACKAGE:-}"

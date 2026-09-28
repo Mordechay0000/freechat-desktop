@@ -57,17 +57,15 @@ if [[ ! -f "$UP/Telegram/lib_base/CMakeLists.txt" ]]; then
 fi
 
 # shellcheck disable=SC1091
-BRAND_ENV="$ROOT/freechat.env"
-[[ -f "$BRAND_ENV" ]] || BRAND_ENV="$ROOT/freechat.env.example"
-[[ -f "$BRAND_ENV" ]] || die "no freechat.env or freechat.env.example at $ROOT"
-load_env_file "$BRAND_ENV" || die "cannot read ${BRAND_ENV#$ROOT/}"
+load_freechat_env "$ROOT" || die "cannot read the FreeChat configuration"
+BRAND_ENV="$FREECHAT_ENV_SOURCES"
 
 # Both are required by configure, and gramsrv does not validate either --
 # internal/rpc/auth.go:874 says so outright: there is no application registry, the
 # values are only remembered. So the defaults in freechat.env are fine for a
 # self-hosted node and registering at my.telegram.org is not needed.
-API_ID="${FREECHAT_API_ID:?FREECHAT_API_ID missing from ${BRAND_ENV#$ROOT/}}"
-API_HASH="${FREECHAT_API_HASH:?FREECHAT_API_HASH missing from ${BRAND_ENV#$ROOT/}}"
+API_ID="${FREECHAT_API_ID:?FREECHAT_API_ID is not set in $BRAND_ENV}"
+API_HASH="${FREECHAT_API_HASH:?FREECHAT_API_HASH is not set in $BRAND_ENV}"
 
 do_prepare() {
   log "$OS: preparing third-party libraries (hours, tens of GB)"

@@ -129,18 +129,35 @@ no working Python 3 found (tried python3, python, py -3).
 # validate either -- internal/rpc/auth.go:874 states there is no application
 # registry and the values are only remembered -- so the defaults in freechat.env are
 # fine for a self-hosted node and my.telegram.org is not involved.
-$brandFile = Join-Path $Root 'freechat.env'
-if (-not (Test-Path $brandFile)) { $brandFile = Join-Path $Root 'freechat.env.example' }
-if (-not (Test-Path $brandFile)) { Die "no freechat.env or freechat.env.example in $Root" }
+# Same rules as scripts/lib/load_env.sh, so one freechat.env means the same
+# thing to every script: freechat.env.example supplies the defaults and
+# freechat.env overrides what it names; a quoted value is taken verbatim;
+# an unquoted one loses an inline comment (whitespace then #) and its
+# surrounding whitespace.
 $brand = @{}
-foreach ($line in Get-Content $brandFile) {
-    if ($line -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$') {
-        $brand[$Matches[1]] = $Matches[2].Trim().Trim('"').Trim("'")
+$brandFiles = @()
+foreach ($name in 'freechat.env.example', 'freechat.env') {
+    $path = Join-Path $Root $name
+    if (-not (Test-Path $path)) { continue }
+    $brandFiles += $name
+    foreach ($line in Get-Content $path) {
+        if ($line -notmatch '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$') { continue }
+        $key = $Matches[1]
+        $value = $Matches[2].Trim()
+        if ($value.Length -ge 2 -and (($value[0] -eq '"' -and $value[-1] -eq '"') -or
+                                      ($value[0] -eq "'" -and $value[-1] -eq "'"))) {
+            $value = $value.Substring(1, $value.Length - 2)
+        } else {
+            $value = ($value -replace '\s#.*$', '').Trim()
+        }
+        $brand[$key] = $value
     }
 }
+if ($brandFiles.Count -eq 0) { Die "no freechat.env or freechat.env.example in $Root" }
+$brandFile = $brandFiles -join ' + '
 foreach ($key in 'FREECHAT_API_ID', 'FREECHAT_API_HASH') {
     if (-not $brand.ContainsKey($key) -or -not $brand[$key]) {
-        Die "$key missing from $brandFile"
+        Die "$key is not set in $brandFile"
     }
 }
 $apiId = $brand['FREECHAT_API_ID']

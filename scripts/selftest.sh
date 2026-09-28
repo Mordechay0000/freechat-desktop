@@ -215,6 +215,10 @@ fi
 # of thing that goes missing when a script is added.
 missing_lib=""
 for f in "$ROOT"/scripts/*.sh; do
+  # Not this file. It names libraries only to test them, and only when they
+  # exist (gen_server_env.py is checked in the server repository alone); the
+  # two it actually sources would fail it on line 20, loudly, if missing.
+  [[ "$(basename "$f")" == selftest.sh ]] && continue
   while read -r libref; do
     [[ -n "$libref" ]] || continue
     [[ -f "$ROOT/scripts/lib/$libref" ]] || missing_lib="$missing_lib $(basename "$f"):$libref"
@@ -338,6 +342,40 @@ elif [[ "$probe_out" == "Private node|two words" ]]; then
   ok "load_env.sh keeps spaced values whole and does not run a stray command"
 else
   bad "load_env.sh parsed wrongly: got '$probe_out' (rc=$probe_rc)"
+fi
+
+# The value rules, and layering, on the lines that actually broke. One vector,
+# and in the server repository also checked against the Python reader of the
+# same files, because four parsers of one format drifted apart once already:
+#   KEY=9090 # port        inline comment -- was kept IN the value
+#   KEY=  'a b'            quotes after spaces -- bash kept the quotes
+#   KEY="x # y"            # inside quotes is data
+#   KEY=http://h/#f        # with no space before it is data
+# plus a freechat.env that names only the port, which used to wipe every other
+# key because it replaced the example instead of layering over it.
+lay="$TMP/layer"; mkdir -p "$lay"
+printf 'FREECHAT_SERVER_IP=10.0.0.1\nFREECHAT_SERVER_PORT=8080\n' > "$lay/freechat.env.example"
+printf "FREECHAT_SERVER_PORT=9090 # port\nA=  'a b'  \nB=\"x # y\"\nC=http://h/#f\n" > "$lay/freechat.env"
+lay_out="$(bash -c '. "'"$ROOT"'/scripts/lib/load_env.sh"; load_freechat_env "'"$lay"'" 2>/dev/null
+  printf "%s|%s|%s|%s|%s" "$FREECHAT_SERVER_IP" "$FREECHAT_SERVER_PORT" "$A" "$B" "$C"' 2>/dev/null)"
+lay_want="10.0.0.1|9090|a b|x # y|http://h/#f"
+if [[ "$lay_out" == "$lay_want" ]]; then
+  ok "config values: inline comments, quotes and layering behave like bash"
+else
+  bad "config parsing: got '$lay_out', want '$lay_want'"
+fi
+if [[ -f "$ROOT/scripts/lib/gen_server_env.py" ]]; then
+  py_lay="$(cd "$ROOT/scripts/lib" && py_run -c "
+import gen_server_env as g
+d = {}
+for n in ('freechat.env.example', 'freechat.env'):
+    d.update(g.read_env('$lay/' + n))
+print('|'.join(d.get(k, '') for k in ('FREECHAT_SERVER_IP', 'FREECHAT_SERVER_PORT', 'A', 'B', 'C')))" 2>&1)"
+  if [[ "$py_lay" == "$lay_want" ]]; then
+    ok "the Python reader agrees with load_env.sh on the same files"
+  else
+    bad "gen_server_env.py disagrees with load_env.sh: got '$py_lay', want '$lay_want'"
+  fi
 fi
 
 if has server; then
