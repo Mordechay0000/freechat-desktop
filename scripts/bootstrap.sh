@@ -18,7 +18,6 @@ set -euo pipefail
 # shellcheck source=lib/portable.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/portable.sh"
 
-
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Safe KEY=VALUE loading. Sourcing a config file executes it; see the header of
@@ -43,125 +42,173 @@ usage: ./scripts/bootstrap.sh [all|${TARGETS// /|}] [--with-submodules]
 EOF
 }
 
-# Parsed by content, not by position. The previous `ONLY="\${1:-all}"` read
-# the FIRST argument as the target, so
-#
-#     ./scripts/bootstrap.sh --with-submodules
-#
-# -- which the README itself told you to run -- set the target to
-# "--with-submodules", matched no component, fetched nothing and printed
-# "done". A command that does nothing and reports success is the most
-# expensive kind of failure: the next step fails somewhere else, naming
-# something else.
+# Parsed by content, not by position.
 ONLY=all
 WITH_SUBMODULES=no
+
 for arg in "$@"; do
   case "$arg" in
-    --with-submodules) WITH_SUBMODULES=yes ;;
-    -h|--help) usage; exit 0 ;;
-    -*) usage >&2; die "unknown option: $arg" ;;
+    --with-submodules)
+      WITH_SUBMODULES=yes
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    -*)
+      usage >&2
+      die "unknown option: $arg"
+      ;;
     *)
       if [[ "$arg" == all || " $TARGETS " == *" $arg "* ]]; then
         ONLY="$arg"
       else
         usage >&2
         die "unknown component: $arg (this repository has: $TARGETS)"
-      fi ;;
+      fi
+      ;;
   esac
 done
 
-wants() { [[ "$ONLY" == all || "$ONLY" == "$1" ]]; }
+wants() {
+  [[ "$ONLY" == all || "$ONLY" == "$1" ]]
+}
+
 fetched=0
 
 fetch_pinned() {
-  local name=$1 dest=$2 pin=$3 submodules=$4
+  local name=$1
+  local dest=$2
+  local pin=$3
+  local submodules=$4
+
   # shellcheck disable=SC1090
   load_env_file "$pin" || die "cannot read $pin"
-  [[ -n "${REPO:-}" && -n "${COMMIT:-}" ]] || die "$pin is missing REPO or COMMIT"
-  # A full SHA, or the fetch below cannot work at all: a shallow fetch by commit
-  # needs the complete 40-character id, because the remote will not resolve an
-  # abbreviation. The desktop pin was once written as "d5a262f", and every fresh
-  # machine then failed five times over ~30 seconds with "couldn't find remote
-  # ref d5a262f" -- a message that points at the network, not at the pin.
-  # scripts/sync-upstream.sh always writes the full id; this catches a hand edit.
+
+  [[ -n "${REPO:-}" && -n "${COMMIT:-}" ]] \
+    || die "$pin is missing REPO or COMMIT"
+
+  # A full SHA is required because a shallow fetch by commit needs the complete
+  # 40-character id.
   [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || die "$pin: COMMIT=$COMMIT is not a full 40-character SHA.
       A shallow fetch cannot resolve an abbreviated commit on the remote.
       Write the full id (git rev-parse <short>), or bump with
       ./scripts/sync-upstream.sh, which always writes it in full."
 
-  if [[ -d "$dest/.git" ]] && [[ "$(git -C "$dest" rev-parse HEAD 2>/dev/null)" == "$COMMIT" ]]; then
-    log "$name already at ${COMMIT:0:12} — skipping"
-    return
-  fi
-
-  log "$name: fetching ${COMMIT:0:12} from $REPO"
-  # The checkout path must be a directory or absent. This was once a real
-  # collision: the pin file was named UPSTREAM and the checkout upstream/, which
-  # on a case-insensitive filesystem -- the default on macOS (APFS) and Windows
-  # (NTFS) -- are the same path. mkdir then failed with a bare "File exists",
-  # and deleting "upstream" to clear it deleted the pin. The pin is now
-  # upstream.pin; this names the problem if anything else ever sits there.
+  # The checkout path must be a directory or absent.
   if [[ -e "$dest" && ! -d "$dest" ]]; then
     die "$dest exists and is not a directory, so the upstream cannot be checked out there.
       On macOS and Windows file names are case-insensitive by default: a file
       called ${dest##*/} in any capitalisation occupies this path. Move it aside."
   fi
+
   mkdir -p "$dest"
 
-  # Test for $dest/.git directly, NOT `git rev-parse --git-dir`: rev-parse walks
-  # UP the tree, so inside this repo it finds FreeChat's own .git, reports
-  # success, and skips the init. Every `git -C "$dest"` below would then act on
-  # the FreeChat repository -- repointing its origin at the upstream and
-  # checking that upstream out over the working tree, destroying it. That is not
-  # hypothetical; it happened.
-  [[ -d "$dest/.git" ]] || git -C "$dest" init -q
+  # Ensure that $dest is an independent Git repository.
+  #
+  # IMPORTANT:
+  # On macOS, paths can differ only in capitalization:
+  #
+  #   /Users/mor/Desktop/...
+  #   /Users/mor/desktop/...
+  #
+  # They refer to the same filesystem object. Therefore we must NOT compare
+  # Git paths as strings. `-ef` compares the actual filesystem objects.
+  if [[ -e "$dest/.git" ]]; then
+    local existing_gitdir expected_gitdir root_gitdir
 
-  # Belt and braces for the same class of mistake: refuse to continue unless the
-  # git directory we are about to write to really is $dest's own.
-  local gitdir
-  gitdir="$(cd "$dest" && git rev-parse --absolute-git-dir 2>/dev/null)" || true
-  # Compared as FILES (-ef: same device and inode), never as strings. A string
-  # compare broke on a Mac: entered as /Users/mor/desktop/..., git answered with
-  # the on-disk spelling /Users/mor/Desktop/... -- the same directory on a
-  # case-insensitive filesystem, a different string -- and this refused a
-  # perfectly good checkout. Symlinked paths differ the same way (/tmp is
-  # /private/tmp on macOS). The protection is unchanged: if rev-parse walked up
-  # to an enclosing repository, its .git is a different file and this refuses.
-  [[ -n "$gitdir" && "$gitdir" -ef "$dest/.git" ]] \
-    || die "$dest is not its own git repository (git dir resolved to '${gitdir:-none}').
+    existing_gitdir="$(git -C "$dest" rev-parse --absolute-git-dir 2>/dev/null || true)"
+    expected_gitdir="$(cd "$dest" && pwd)/.git"
+    root_gitdir="$(git -C "$ROOT" rev-parse --absolute-git-dir 2>/dev/null || true)"
+
+    # The Git directory belongs to $dest if both paths identify the same
+    # filesystem object, even when their capitalization differs.
+    if [[ -d "$existing_gitdir" && -d "$expected_gitdir" ]] &&
+       [[ "$existing_gitdir" -ef "$expected_gitdir" ]]; then
+      :
+    elif [[ -n "$existing_gitdir" && -n "$root_gitdir" ]] &&
+         [[ -d "$existing_gitdir" && -d "$root_gitdir" ]] &&
+         [[ "$existing_gitdir" -ef "$root_gitdir" ]]; then
+
+      # Git resolved to the enclosing FreeChat repository. This is the stale
+      # metadata case. Remove only the incorrect .git entry from the upstream
+      # checkout and create a real independent repository.
+      log "$name: removing stale Git metadata from $dest"
+      rm -rf "$dest/.git"
+      git -C "$dest" init -q
+    else
+      die "$dest is not its own git repository
+      (git dir resolved to '${existing_gitdir:-none}').
+      Refusing to remove unexpected Git metadata."
+    fi
+  else
+    git -C "$dest" init -q
+  fi
+
+  # Final safety check. Again use filesystem identity rather than string
+  # comparison so macOS case-insensitive paths work correctly.
+  local gitdir expected_gitdir_final
+  gitdir="$(git -C "$dest" rev-parse --absolute-git-dir 2>/dev/null)" \
+    || die "$dest is not a valid git repository"
+
+  expected_gitdir_final="$(cd "$dest" && pwd)/.git"
+
+  [[ -d "$gitdir" && -d "$expected_gitdir_final" ]] &&
+  [[ "$gitdir" -ef "$expected_gitdir_final" ]] \
+    || die "$dest is not its own git repository (git dir resolved to '$gitdir').
       Refusing to run: this would rewrite the enclosing repository."
 
   git -C "$dest" remote get-url origin >/dev/null 2>&1 \
     && git -C "$dest" remote set-url origin "$REPO" \
     || git -C "$dest" remote add origin "$REPO"
 
+  # If the requested commit is already checked out, avoid another fetch.
+  if [[ "$(git -C "$dest" rev-parse HEAD 2>/dev/null || true)" == "$COMMIT" ]]; then
+    log "$name already at ${COMMIT:0:12} — skipping"
+    return
+  fi
+
   # Retry: a cold 1.3GB fetch over a flaky link is the normal failure here.
-  local try delay=2
+  local try
+  local delay=2
+
   for try in 1 2 3 4 5; do
-    if git -C "$dest" fetch --depth 1 --no-tags origin "$COMMIT"; then break; fi
+    if git -C "$dest" fetch --depth 1 --no-tags origin "$COMMIT"; then
+      break
+    fi
+
     [[ $try -eq 5 ]] && die "$name: fetch failed after 5 attempts"
+
     log "$name: fetch attempt $try failed; retrying in ${delay}s"
-    sleep "$delay"; delay=$(( delay * 2 ))
+    sleep "$delay"
+    delay=$(( delay * 2 ))
   done
 
   git -C "$dest" checkout -q --force FETCH_HEAD
+
   if [[ "$submodules" == "yes" ]]; then
     log "$name: submodules (this is the slow part)"
     git -C "$dest" submodule update --init --recursive --depth 1
   fi
+
   log "$name: at $(git -C "$dest" rev-parse --short HEAD)"
 }
 
 # Desktop submodules are opt-in: the 36 of them plus
-# Telegram/build/prepare/*.sh are tens of GB, and the overlay only needs the
-# source tree. Pass --with-submodules when you are actually going to build.
+# Telegram/build/prepare/*.sh are tens of GB, and the overlay only needs
+# the source tree. Pass --with-submodules when you are actually going to build.
 if wants desktop; then
-  fetch_pinned "desktop" "$ROOT/desktop/upstream" "$ROOT/desktop/upstream.pin" "$WITH_SUBMODULES"
+  fetch_pinned \
+    "desktop" \
+    "$ROOT/desktop/upstream" \
+    "$ROOT/desktop/upstream.pin" \
+    "$WITH_SUBMODULES"
+
   fetched=$((fetched + 1))
 fi
 
-# Belt and braces for the bug described at the argument parser: whatever the
-# arguments were, doing nothing is never success.
+# Doing nothing is never success.
 (( fetched > 0 )) || die "nothing was fetched for '$ONLY' (this repository has: $TARGETS)"
 
 log "done. next: ./scripts/apply-overlay.sh"
+
