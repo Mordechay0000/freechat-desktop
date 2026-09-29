@@ -166,6 +166,58 @@ else
   bad "bootstrap refused a path that differs only in spelling: $(tail -1 "$TMP/out_alias")"
 fi
 
+# Stale .git metadata in the upstream checkout: a .git that git does not
+# recognise (an interrupted init, a half-deleted directory), so rev-parse walks
+# up to THIS repository. bootstrap removes only that entry and re-initialises.
+# Checked both ways: the fetch succeeds, and the enclosing repository is exactly
+# as it was -- the property the first version of this script once violated.
+rm -rf "$work/$FIRST/upstream"
+mkdir -p "$work/$FIRST/upstream/.git"
+outer_head="$(git -C "$work" rev-parse HEAD)"; outer_origin="$(git -C "$work" remote get-url origin)"
+if ( cd "$work" && ./scripts/bootstrap.sh "$FIRST" ) >"$TMP/out_stale" 2>&1 \
+   && [[ -f "$work/$FIRST/upstream/UPSTREAM_MARKER" ]] \
+   && [[ "$(git -C "$work" rev-parse HEAD)" == "$outer_head" ]] \
+   && [[ "$(git -C "$work" remote get-url origin)" == "$outer_origin" ]]; then
+  ok "stale .git in the upstream is replaced; the enclosing repo is untouched"
+else
+  bad "stale .git recovery: $(tail -1 "$TMP/out_stale")"
+fi
+
+# --with-submodules on a checkout that already exists. The "already at the
+# pinned commit" early return skipped submodules entirely, so the second of
+#   ./scripts/bootstrap.sh
+#   ./scripts/bootstrap.sh --with-submodules
+# fetched nothing and printed "done" -- while build-desktop.sh, finding them
+# missing, told you to run exactly that. Needs a fake upstream WITH a
+# submodule; file:// submodules are blocked by default since git 2.38, so this
+# test (only) allows them.
+if ! has server || [[ "$FIRST" != server ]]; then
+  sub_src="$TMP/fake-sub"; with_sub="$TMP/fake-with-sub"
+  git init -q "$sub_src" && echo sub > "$sub_src/SUB_MARKER"
+  git -C "$sub_src" add -A && git -C "$sub_src" -c user.email=t@t -c user.name=t commit -q -m sub
+  git clone -q "$fake" "$with_sub"
+  git -C "$with_sub" -c protocol.file.allow=always submodule add -q "$sub_src" sub >/dev/null 2>&1
+  git -C "$with_sub" -c user.email=t@t -c user.name=t commit -q -m "add submodule"
+  printf 'REPO=%s\nCOMMIT=%s\nBRANCH=master\n' "$with_sub" "$(git -C "$with_sub" rev-parse HEAD)" \
+    > "$work/$FIRST/upstream.pin"
+  rm -rf "$work/$FIRST/upstream"
+  export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=protocol.file.allow GIT_CONFIG_VALUE_0=always
+  ( cd "$work" && ./scripts/bootstrap.sh "$FIRST" ) >/dev/null 2>&1
+  # Remove whatever the first run fetched, so only the second can provide it.
+  git -C "$work/$FIRST/upstream" submodule deinit -q -f --all >/dev/null 2>&1
+  ( cd "$work" && ./scripts/bootstrap.sh "$FIRST" --with-submodules ) >"$TMP/out_sub" 2>&1
+  unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+  if [[ -f "$work/$FIRST/upstream/sub/SUB_MARKER" ]]; then
+    ok "--with-submodules fetches submodules on an existing checkout"
+  else
+    bad "--with-submodules on an existing checkout fetched no submodules: $(tail -1 "$TMP/out_sub")"
+  fi
+  # Leave the pin as the later checks expect it.
+  printf 'REPO=%s\nCOMMIT=%s\nBRANCH=master\n' "$fake" "$fake_sha" > "$work/$FIRST/upstream.pin"
+  rm -rf "$work/$FIRST/upstream"
+  ( cd "$work" && ./scripts/bootstrap.sh "$FIRST" ) >/dev/null 2>&1
+fi
+
 # --- arguments: any order, validated, never a silent no-op -----------------
 # The real failure: `./scripts/bootstrap.sh --with-submodules`, exactly as the
 # desktop README said to run it, read the flag as the component name, fetched

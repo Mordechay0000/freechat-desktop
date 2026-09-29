@@ -162,9 +162,19 @@ fetch_pinned() {
     && git -C "$dest" remote set-url origin "$REPO" \
     || git -C "$dest" remote add origin "$REPO"
 
-  # If the requested commit is already checked out, avoid another fetch.
+  # If the requested commit is already checked out, avoid another fetch --
+  # but NOT the submodules. Being at the pinned commit says nothing about them,
+  # and returning here unconditionally made `--with-submodules` on an existing
+  # checkout fetch none of the desktop client's 36 submodules and print "done",
+  # while build-desktop.sh told you to run exactly that. `submodule update` is a
+  # no-op when they are already present.
   if [[ "$(git -C "$dest" rev-parse HEAD 2>/dev/null || true)" == "$COMMIT" ]]; then
-    log "$name already at ${COMMIT:0:12} — skipping"
+    log "$name already at ${COMMIT:0:12}"
+    if [[ "$submodules" == "yes" ]]; then
+      log "$name: submodules (this is the slow part)"
+      git -C "$dest" submodule update --init --recursive --depth 1 \
+        || die "$name: submodule update failed"
+    fi
     return
   fi
 
@@ -188,7 +198,8 @@ fetch_pinned() {
 
   if [[ "$submodules" == "yes" ]]; then
     log "$name: submodules (this is the slow part)"
-    git -C "$dest" submodule update --init --recursive --depth 1
+    git -C "$dest" submodule update --init --recursive --depth 1 \
+      || die "$name: submodule update failed"
   fi
 
   log "$name: at $(git -C "$dest" rev-parse --short HEAD)"
