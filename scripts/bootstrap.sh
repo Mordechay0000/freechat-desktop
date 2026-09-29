@@ -120,7 +120,14 @@ fetch_pinned() {
   # git directory we are about to write to really is $dest's own.
   local gitdir
   gitdir="$(cd "$dest" && git rev-parse --absolute-git-dir 2>/dev/null)" || true
-  [[ "$gitdir" == "$(cd "$dest" && pwd)/.git" ]] \
+  # Compared as FILES (-ef: same device and inode), never as strings. A string
+  # compare broke on a Mac: entered as /Users/mor/desktop/..., git answered with
+  # the on-disk spelling /Users/mor/Desktop/... -- the same directory on a
+  # case-insensitive filesystem, a different string -- and this refused a
+  # perfectly good checkout. Symlinked paths differ the same way (/tmp is
+  # /private/tmp on macOS). The protection is unchanged: if rev-parse walked up
+  # to an enclosing repository, its .git is a different file and this refuses.
+  [[ -n "$gitdir" && "$gitdir" -ef "$dest/.git" ]] \
     || die "$dest is not its own git repository (git dir resolved to '${gitdir:-none}').
       Refusing to run: this would rewrite the enclosing repository."
 

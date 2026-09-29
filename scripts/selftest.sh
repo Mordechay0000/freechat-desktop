@@ -135,7 +135,10 @@ else
 fi
 
 gitdir="$(cd "$work/$FIRST/upstream" 2>/dev/null && git rev-parse --absolute-git-dir 2>/dev/null)"
-if [[ "$gitdir" == "$work/$FIRST/upstream/.git" ]]; then
+# -ef, not ==: on macOS mktemp lives under /var/folders, a symlink to
+# /private/var, so git's answer and this path are different strings for the
+# same directory and a string compare failed on every Mac.
+if [[ -n "$gitdir" && "$gitdir" -ef "$work/$FIRST/upstream/.git" ]]; then
   ok "$FIRST/upstream is its own repository"
 else
   bad "$FIRST/upstream git dir is '$gitdir', expected its own .git"
@@ -147,6 +150,20 @@ if ( cd "$work" && ./scripts/bootstrap.sh "$FIRST" ) >"$TMP/out2" 2>&1 \
   ok "second bootstrap run is a no-op"
 else
   bad "second bootstrap run did not detect the existing checkout"
+fi
+
+# Entered through a path spelled differently from the on-disk one. On a Mac,
+# `cd /Users/me/desktop/...` works although the folder is Desktop, and git
+# reports the on-disk spelling; the git-dir guard compared the two as strings
+# and refused a correct checkout. A symlink produces the same mismatch on any
+# system (and is itself real on macOS: /tmp is /private/tmp), so it stands in
+# for the case-insensitive filesystem this machine does not have.
+rm -rf "$work/$FIRST/upstream"
+ln -s "$work" "$TMP/alias"
+if ( cd "$TMP/alias" && ./scripts/bootstrap.sh "$FIRST" ) >"$TMP/out_alias" 2>&1; then
+  ok "bootstrap works through a path spelled unlike the on-disk one"
+else
+  bad "bootstrap refused a path that differs only in spelling: $(tail -1 "$TMP/out_alias")"
 fi
 
 # --- arguments: any order, validated, never a silent no-op -----------------
