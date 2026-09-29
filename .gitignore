@@ -27,6 +27,9 @@ api_credentials.local.*
 
 # Desktop upstream checkout — fetched by bootstrap.sh, never committed.
 /desktop/upstream/
+# Third-party libraries built by prepare (desktop/Libraries, tens of GB).
+/desktop/Libraries/
+/desktop/ThirdParty/
 
 # Split output — regenerate with scripts/split-repos.sh, never committed here.
 /split/
