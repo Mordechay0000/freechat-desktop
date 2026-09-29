@@ -99,9 +99,17 @@ do_configure() {
   fi
 
   log "$OS: configuring"
+  # The app's macOS target, from the same key apply-overlay.sh writes into
+  # prepare.py for the libraries. Upstream's cmake sets 10.13 as a CACHE entry,
+  # which a -D on the command line overrides without touching the submodule.
+  local mac_args=()
+  if [[ "$OS" == mac ]]; then
+    mac_args=(-D CMAKE_OSX_DEPLOYMENT_TARGET="${FREECHAT_MACOS_DEPLOYMENT_TARGET:-12.0}")
+  fi
   ( cd "$UP/Telegram" && ./configure.sh \
       -D TDESKTOP_API_ID="$API_ID" \
-      -D TDESKTOP_API_HASH="$API_HASH" )
+      -D TDESKTOP_API_HASH="$API_HASH" \
+      ${mac_args[@]+"${mac_args[@]}"} )
   mkdir -p "$UP/out" && printf '%s\n' "$want" > "$stamp"
 }
 

@@ -196,6 +196,29 @@ apply_desktop() {
   load_branding desktop
   log "desktop: branding -> $BRAND_NAME @ $BRAND_SERVER_ADDRESS"
 
+  # macOS deployment target for the libraries prepare/mac.sh builds. The app's
+  # own target is passed to cmake by build-desktop.sh; both read the same key so
+  # they cannot disagree, which would be a link error. prepare.py is inside the
+  # reset scope, so each run patches the pristine 10.13 -- a changed value in
+  # freechat.env takes effect on the next apply.
+  local mac_min="${FREECHAT_MACOS_DEPLOYMENT_TARGET:-12.0}"
+  [[ "$mac_min" =~ ^[0-9]+(\.[0-9]+)*$ ]] \
+    || die "FREECHAT_MACOS_DEPLOYMENT_TARGET='$mac_min' is not a version like 12.0"
+  py_run - "$up/Telegram/build/prepare/prepare.py" "$mac_min" <<'PYMAC' \
+    || die "could not set the macOS deployment target in prepare.py"
+import sys
+path, want = sys.argv[1], sys.argv[2]
+t = open(path, encoding="utf-8").read()
+pairs = [("'MACOSX_DEPLOYMENT_TARGET': '10.13'", f"'MACOSX_DEPLOYMENT_TARGET': '{want}'"),
+         ("'-mmacosx-version-min=10.13'", f"'-mmacosx-version-min={want}'")]
+for old, new in pairs:
+    if t.count(old) != 1:
+        sys.exit(f"prepare.py: expected exactly one {old!r} -- upstream changed; update this hook")
+    t = t.replace(old, new)
+open(path, "w", encoding="utf-8").write(t)
+PYMAC
+  log "desktop: macOS deployment target -> $mac_min"
+
   local header="$up/Telegram/SourceFiles/freechat/freechat_builtin.h"
   py_run - "$header" "$BRAND_NAME" "${BRAND_SERVER_DESCRIPTION:-}" \
     "$BRAND_SERVER_ADDRESS" "${BRAND_SERVER_DC:-2}" \
