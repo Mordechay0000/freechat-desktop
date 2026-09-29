@@ -63,7 +63,7 @@ def replacements(brand):
 
 TEXT_SUFFIXES = (".cpp", ".h", ".txt", ".qrc", ".rc", ".strings", ".style",
                  ".json", ".py", ".sh", ".cmake", ".md", ".xml", ".desktop",
-                 ".plist", ".in")
+                 ".plist", ".in", ".service")
 SKIP_DIRS = {".git", "build", "out", "ThirdParty", "cmake-build-debug"}
 
 
@@ -78,7 +78,7 @@ def walk_sources(root):
             for name in filenames:
                 if name.endswith(TEXT_SUFFIXES):
                     yield os.path.join(dirpath, name)
-    for extra in ("Telegram/CMakeLists.txt",):
+    for extra in ("Telegram/CMakeLists.txt", "Telegram/Telegram.plist"):
         path = os.path.join(root, extra)
         if os.path.isfile(path):
             yield path
@@ -111,6 +111,21 @@ def move_paths(root, brand, report):
                 new = re.sub("owpengram", lower, name, flags=re.I)
                 os.replace(os.path.join(d, name), os.path.join(d, new))
                 report.append(f"    renamed {name} -> {new}")
+
+    # lib/xdg holds the Linux desktop entry, D-Bus service and AppStream
+    # metadata. walk_sources() rewrites every REFERENCE to them -- in
+    # Telegram/CMakeLists.txt (configure_file) and in telegram.qrc, which is
+    # compiled into the app on every platform -- so the files must be renamed to
+    # match. They were not: 58 of the fork's 62 owpengram-named files were
+    # renamed and these three were not, so rcc failed on a qrc entry naming a
+    # file that did not exist, on macOS and Windows as well as Linux.
+    xdg = os.path.join(root, "lib/xdg")
+    if os.path.isdir(xdg):
+        for name in sorted(os.listdir(xdg)):
+            if "owpengram" in name.lower():
+                new = re.sub("owpengram", lower, name, flags=re.I)
+                os.replace(os.path.join(xdg, name), os.path.join(xdg, new))
+                report.append(f"    renamed lib/xdg/{name} -> {new}")
 
     # Resources/OwpenGram holds the fork's icons and platform metadata.
     src = os.path.join(root, "Telegram/Resources/OwpenGram")
@@ -197,16 +212,29 @@ def main():
         print(line)
 
     leftovers = []
-    for path in walk_sources(root):
-        try:
-            text = open(path, encoding="utf-8").read()
-        except (OSError, UnicodeDecodeError):
-            continue
-        if re.search(r"owpengram", text, re.I):
-            leftovers.append(os.path.relpath(path, root))
+    # Every text file the build can read, NOT just the suffixes the rewrite
+    # handles. Checking with the same suffix list as the rewrite made the check
+    # blind to exactly what the rewrite missed: lib/xdg/*.service kept
+    # "Name=org.owpengram.desktop" and "Exec=.../OwpenGram" while this reported a
+    # clean purge. Binary files fail to decode and are skipped.
+    for top in ("Telegram", "lib"):
+        for dirpath, dirnames, filenames in os.walk(os.path.join(root, top)):
+            dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+            for name in filenames:
+                path = os.path.join(dirpath, name)
+                try:
+                    text = open(path, encoding="utf-8").read()
+                except (OSError, UnicodeDecodeError):
+                    continue
+                if re.search(r"owpengram", text, re.I):
+                    leftovers.append(os.path.relpath(path, root))
+    # Every tree the build reads from. This walked Telegram/ only, so the three
+    # unrenamed files in lib/xdg passed it -- the check reported a clean purge
+    # over a tree that could not build.
     stragglers = [p for p in
                   (os.path.relpath(os.path.join(dp, f), root)
-                   for dp, _, fs in os.walk(os.path.join(root, "Telegram"))
+                   for top in ("Telegram", "lib")
+                   for dp, _, fs in os.walk(os.path.join(root, top))
                    for f in fs)
                   if "owpengram" in p.lower()]
     if leftovers or stragglers:

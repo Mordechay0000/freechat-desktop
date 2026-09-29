@@ -186,7 +186,9 @@ apply_desktop() {
   # them leaves the renamed copies behind untracked and both names end up in the
   # tree -- which the purge's own leftover check then fails on, correctly.
   log "desktop: resetting upstream to the pinned tree"
-  reset_upstream "$up" Telegram -- Telegram/SourceFiles Telegram/Resources
+  # lib/ too: the purge renames lib/xdg/*, so each run has to start from the
+  # fork's own names or a rename could be left half-applied by a changed fork.
+  reset_upstream "$up" Telegram lib -- Telegram/SourceFiles Telegram/Resources lib
 
   log "desktop: overlay files"
   copy_overlay "$ROOT/desktop/overlay" "$up"
@@ -288,6 +290,33 @@ PY7
   py_run "$ROOT/scripts/lib/purge_branding_desktop.py" "$up" "$BRAND_NAME" \
     "$([[ "${BRAND_INCLUDE_TELEGRAM:-false}" =~ ^(1|true|yes|on)$ ]] && echo false || echo true)" \
     || die "desktop branding purge failed — see the paths above"
+
+  # Every file the build will look for must exist NOW. The purge rewrites names
+  # in CMakeLists.txt and the .qrc files; if a reference and its file ever
+  # disagree, the build fails -- but only after prepare has spent hours on Qt
+  # and FFmpeg, and in a message about rcc that says nothing about this script.
+  # That happened: telegram.qrc named lib/xdg/org.freechat.desktop.desktop while
+  # the file still carried the fork's name. Checked here, it costs a second.
+  log "desktop: checking every file the build references exists"
+  py_run - "$up" <<'PYREF' || die "the tree references files that do not exist (listed above)"
+import os, re, sys, glob
+up = sys.argv[1]
+missing = []
+# .qrc entries are relative to the .qrc file.
+for q in glob.glob(os.path.join(up, "Telegram/Resources/**/*.qrc"), recursive=True):
+    base = os.path.dirname(q)
+    for f in re.findall(r"<file[^>]*>([^<]+)</file>", open(q, encoding="utf-8").read()):
+        if not os.path.exists(os.path.normpath(os.path.join(base, f.strip()))):
+            missing.append(f"{os.path.relpath(q, up)}: {f.strip()}")
+# configure_file() inputs are relative to Telegram/.
+cm = os.path.join(up, "Telegram/CMakeLists.txt")
+for f in re.findall(r'configure_file\(\s*"([^"$]+)"', open(cm, encoding="utf-8").read()):
+    if not os.path.exists(os.path.normpath(os.path.join(up, "Telegram", f))):
+        missing.append(f"Telegram/CMakeLists.txt configure_file: {f}")
+for m in missing:
+    print("  MISSING " + m, file=sys.stderr)
+sys.exit(1 if missing else 0)
+PYREF
 
   log "desktop: overlay applied"
 }
