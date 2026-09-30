@@ -159,13 +159,20 @@ Say "    root $Root"
 # whole point is to report a missing prerequisite instead of dying on it, so it
 # cannot be behind the checks that die.
 
-# One line per submodule that is not fully checked out, from git itself.
+# One line per submodule that is not fully checked out, from git itself. Also sets
+# $SubmoduleCount to how many it saw, from the same call: on a shared folder each
+# `git submodule status --recursive` costs, and asking twice for one answer is a
+# minute of nothing happening on screen.
+$SubmoduleCount = 0
 function Get-SubmoduleProblems {
+    $script:SubmoduleCount = 0
     $bad = @()
     # No git is its own report ("git ... not on PATH"); asking it anything here
     # would be a command-not-found from inside a diagnostic.
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return $bad }
     foreach ($line in (& git -C $Up submodule status --recursive 2>$null)) {
+        if (-not $line) { continue }
+        $script:SubmoduleCount++
         if ($line -notmatch '^\s') { $bad += $line.Trim() }
     }
     return $bad
@@ -395,7 +402,7 @@ function Invoke-Doctor {
     } elseif (Test-Path (Join-Path $Up '.git')) {
         $subs = Get-SubmoduleProblems
         if ($subs.Count -eq 0) {
-            Report 'submodules' 'complete'
+            Report 'submodules' "$SubmoduleCount complete"
         } else {
             Report 'submodules' "$($subs.Count) problem(s):" -Blocking
             foreach ($s in $subs) { Say "                    $s" }
@@ -430,6 +437,16 @@ if ($Stage -eq 'doctor') {
     exit 0
 }
 
+# --- the phases that used to be silent --------------------------------------
+#
+# A run that stops must not look like a run that did nothing: on a mapped drive
+# (a VM's shared folder) the git scans alone take minutes, and the first report of
+# this script was "it printed two lines and stopped" -- which was a check that had
+# not finished yet and a later check that would have refused anyway. Each phase
+# now says what it is about to do, and the cheap machine prerequisites come before
+# the expensive tree scan, so the answer that matters arrives first.
+
+Log 'checking the tree and the overlay'
 if (-not (Test-Path (Join-Path $Up 'Telegram\SourceFiles'))) {
     Die "desktop upstream missing - run: bash scripts/bootstrap.sh desktop"
 }
@@ -441,61 +458,16 @@ if (-not (Select-String -Path $introPath -Pattern 'FreeChatBuiltin' -Quiet)) {
     Die "the auto-join hook is missing - run: bash scripts/apply-overlay.sh desktop"
 }
 
+Log 'checking the toolchain'
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     Die "git is not on PATH. Install Git for Windows (https://git-scm.com/download/win)."
 }
 
-# Submodule directories exist but are EMPTY until checked out, so test for a file
-# inside one rather than for the directory.
-if (-not (Test-Path (Join-Path $Up 'Telegram\lib_base\CMakeLists.txt'))) {
-    Die @"
-submodules are not checked out, and the build needs them:
-      bash scripts/bootstrap.sh desktop --with-submodules
-      Expect tens of GB. If that was interrupted, run it again: git continues and
-      skips the submodules it already has.
-"@
-}
-
-# Ask git whether every submodule is really there, not merely that one file is.
-#
-# The test above catches "nothing was fetched at all". What it does not catch is
-# the expensive half-way state: a fetch interrupted by a dropped network leaves
-# directories that exist and are EMPTY, and the build then fails hours later
-# inside a missing header nobody deleted on purpose. `git submodule status
-# --recursive` is git's own answer (a leading '-' means not initialized, '+' a
-# different commit than recorded), and `git submodule update --init --recursive`
-# is both the repair and the resume -- it fetches what is missing and skips what
-# is present. Same rule as the bash side: bootstrap.sh, build-desktop.sh and this
-# script all ask git rather than trusting an existing directory.
-function Assert-Submodules {
-    $bad = Get-SubmoduleProblems
-    if ($bad.Count -eq 0) { return }
-    Warn 'submodules are incomplete:'
-    foreach ($b in $bad) { Warn "  $b" }
-    Log 'running git submodule update --init --recursive (git skips what is present)'
-    & git -C $Up submodule update --init --recursive --depth 1
-    if ($LASTEXITCODE -ne 0) {
-        Die @"
-git submodule update failed. A dropped network is the usual cause.
-      Run this script again: git resumes and skips the submodules it already has.
-"@
-    }
-    $left = Get-SubmoduleProblems
-    if ($left.Count -gt 0) {
-        $joined = $left -join "`n"
-        Die @"
-submodules are still incomplete after the repair:
-$joined
-      Repair by hand: git -C $Up submodule update --init --recursive
-"@
-    }
-    Log 'submodules verified and complete'
-}
-
-Assert-Submodules
-
 # The VS environment is what makes cl.exe and the right toolset available. Without
-# it prepare/win.bat and configure.bat fail in ways that do not mention it.
+# it prepare/win.bat and configure.bat fail in ways that do not mention it. Checked
+# before the submodules, because it costs nothing and it is the one prerequisite
+# that is not on PATH -- waiting minutes for a tree scan to be told about an
+# environment variable is the wrong order.
 if (-not $env:VSINSTALLDIR) {
     Die @"
 the Visual Studio environment is not initialised in this terminal.
@@ -545,6 +517,8 @@ no working Python 3 found (tried python3, python, py -3).
 }
 Log "python 3: $python"
 
+Log 'reading the configuration'
+
 # Branding, including the API credentials configure requires. gramsrv does not
 # validate either -- internal/rpc/auth.go:874 states there is no application
 # registry and the values are only remembered -- so the defaults in freechat.env are
@@ -582,6 +556,68 @@ foreach ($key in 'FREECHAT_API_ID', 'FREECHAT_API_HASH') {
 }
 $apiId = $brand['FREECHAT_API_ID']
 $apiHash = $brand['FREECHAT_API_HASH']
+
+# --- the submodules, last of the checks --------------------------------------
+#
+# Last because it is the expensive one: `git submodule status --recursive` is one
+# git invocation per submodule, and on a mapped drive (a VM's shared folder) the
+# desktop client's 40 of them take minutes. That is what the first report of this
+# script looked like from the outside -- "it prints two lines and stops" -- so the
+# phase announces itself, and by the time it runs, the cheap prerequisites have
+# already had their say.
+Log 'verifying the submodules (one git call each; slow on a shared folder)'
+
+# Submodule directories exist but are EMPTY until checked out, so test for a file
+# inside one rather than for the directory.
+if (-not (Test-Path (Join-Path $Up 'Telegram\lib_base\CMakeLists.txt'))) {
+    Die @"
+submodules are not checked out, and the build needs them:
+      bash scripts/bootstrap.sh desktop --with-submodules
+      Expect tens of GB. If that was interrupted, run it again: git continues and
+      skips the submodules it already has.
+"@
+}
+
+# Ask git whether every submodule is really there, not merely that one file is.
+#
+# The test above catches "nothing was fetched at all". What it does not catch is
+# the expensive half-way state: a fetch interrupted by a dropped network leaves
+# directories that exist and are EMPTY, and the build then fails hours later
+# inside a missing header nobody deleted on purpose. `git submodule status
+# --recursive` is git's own answer (a leading '-' means not initialized, '+' a
+# different commit than recorded), and `git submodule update --init --recursive`
+# is both the repair and the resume -- it fetches what is missing and skips what
+# is present. Same rule as the bash side: bootstrap.sh, build-desktop.sh and this
+# script all ask git rather than trusting an existing directory.
+function Assert-Submodules {
+    $bad = Get-SubmoduleProblems
+    if ($bad.Count -eq 0) {
+        Log "submodules: $SubmoduleCount checked out and complete"
+        return
+    }
+    Warn 'submodules are incomplete:'
+    foreach ($b in $bad) { Warn "  $b" }
+    Log 'running git submodule update --init --recursive (git skips what is present)'
+    & git -C $Up submodule update --init --recursive --depth 1
+    if ($LASTEXITCODE -ne 0) {
+        Die @"
+git submodule update failed. A dropped network is the usual cause.
+      Run this script again: git resumes and skips the submodules it already has.
+"@
+    }
+    $left = Get-SubmoduleProblems
+    if ($left.Count -gt 0) {
+        $joined = $left -join "`n"
+        Die @"
+submodules are still incomplete after the repair:
+$joined
+      Repair by hand: git -C $Up submodule update --init --recursive
+"@
+    }
+    Log "submodules: $SubmoduleCount checked out and complete after the repair"
+}
+
+Assert-Submodules
 
 # The check behind "Neither Qt6 nor Qt5 is found".
 #
