@@ -20,13 +20,13 @@ the Visual Studio environment has been initialised with the OLD toolset. VS
     %comspec% /k "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=14.44
 
 Usage, from that terminal:
-    powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 [-Stage doctor|prepare|configure|build|all] [-Arch x64|x86]
+    powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 [-Stage doctor|prepare|configure|build|all] [-Arch auto|x64|x86|arm64]
 #>
 param(
     [ValidateSet('doctor', 'prepare', 'configure', 'build', 'all')]
     [string]$Stage = 'configure',
-    [ValidateSet('x64', 'x86')]
-    [string]$Arch = 'x64'
+    [ValidateSet('auto', 'x64', 'x86', 'arm64')]
+    [string]$Arch = 'auto'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -74,9 +74,71 @@ trap {
     exit 1
 }
 
+# The architecture, and the three tools that each spell it differently.
+#
+# Windows has no universal binary: no lipo, and ARM64X -- a single PE carrying
+# both an Arm64 and an x64 view -- runs on Windows on Arm only, so it does not
+# replace an x64 build either. A Windows build is one architecture, and upstream
+# supports three of them:
+#
+#   -Arch   $env:Platform   configure.bat   msbuild   libraries
+#   x86     x86             x86             Win32     Libraries
+#   x64     x64             x64             x64       Libraries\win64
+#   arm64   arm64           arm             ARM64     Libraries
+#
+# `auto`, the default, reads the environment, and that is not laziness: prepare.py
+# takes its architecture from exactly $env:Platform (set by the Visual Studio
+# prompt), so asking for x64 while the prompt is ARM64 builds the libraries for
+# one architecture and the app for the other, which fails while linking.
+function Resolve-Arch {
+    param([string]$Requested)
+    if ($Requested -ne 'auto') {
+        $script:ArchOrigin = 'requested'
+        return $Requested
+    }
+    foreach ($candidate in @($env:Platform, $env:VSCMD_ARG_TGT_ARCH)) {
+        if (-not $candidate) { continue }
+        $value = $candidate.ToLower()
+        if ($value -eq 'amd64') { $value = 'x64' }
+        if (@('x86', 'x64', 'arm64') -contains $value) {
+            $script:ArchOrigin = "from the Visual Studio environment ($candidate)"
+            return $value
+        }
+    }
+    $script:ArchOrigin = 'the default - no architecture in the environment'
+    return 'x64'
+}
+
+# What configure.bat wants: it takes the architecture as a bare argument, and its
+# run_cmake.py maps 'arm' to -AARM64.
+function Get-ConfigureArch {
+    if ($Arch -eq 'arm64') { return 'arm' }
+    return $Arch
+}
+
+# What msbuild wants. The 32-bit platform is called Win32 there, not x86.
+function Get-MsbuildPlatform {
+    if ($Arch -eq 'arm64') { return 'ARM64' }
+    if ($Arch -eq 'x86') { return 'Win32' }
+    return $Arch
+}
+
+$RequestedArch = $Arch
+$Arch = Resolve-Arch $Arch
+
+# The prompt that has to be used, which depends on the architecture: vcvars32 and
+# vcvars64 for x86 and x64, and the ARM64 one for arm64. prepare.py refuses to
+# start without $env:Platform from one of them, so this is the first thing to fix
+# when the prepare stage fails immediately.
+$VcvarsScript = 'vcvars64.bat'
+$VcvarsArch = ''
+if ($Arch -eq 'x86') { $VcvarsScript = 'vcvars32.bat' }
+if ($Arch -eq 'arm64') { $VcvarsScript = 'vcvarsall.bat'; $VcvarsArch = 'arm64 ' }
+$VcvarsHint = "%comspec% /k `"C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\$VcvarsScript`" $VcvarsArch-vcvars_ver=14.44"
+
 # Printed before any check runs, so that "the script did nothing" can never mean
 # "the script said nothing": the first line is on screen whatever happens next.
-Log "FreeChat desktop - windows, $Arch, stage $Stage"
+Log "FreeChat desktop - windows, $Arch ($ArchOrigin), stage $Stage"
 Say "    root $Root"
 
 # --- helpers the checks and the doctor both need ---------------------------
@@ -94,17 +156,15 @@ function Get-SubmoduleProblems {
     return $bad
 }
 
-# Where prepare\win.bat installs Qt for this architecture.
-#
-# The architecture is part of the path because upstream's cmake reads only the
-# root for the architecture being built (variables.cmake: build_win64 ->
-# ../Libraries/win64) and prepare.py installs into the same one. A tree prepared
-# for x86 is therefore invisible to an x64 build in a way that looks exactly like
-# "no Qt at all", and saying so is the difference between a five-minute fix and
-# an afternoon.
+# Where prepare\win.bat installs Qt for this architecture: upstream puts x64 in
+# Libraries\win64 and x86 and arm64 in Libraries (variables.cmake: build_win64 ->
+# ../Libraries/win64, everything else -> ../Libraries), and prepare.py installs
+# into the same root. A tree prepared for one of them is invisible to another in
+# a way that looks exactly like "no Qt at all", so the check below says which
+# root it wanted.
 function Get-PreparedQtRoot {
-    if ($Arch -eq 'x86') { return (Join-Path $Root 'desktop\Libraries') }
-    return (Join-Path $Root 'desktop\Libraries\win64')
+    if ($Arch -eq 'x64') { return (Join-Path $Root 'desktop\Libraries\win64') }
+    return (Join-Path $Root 'desktop\Libraries')
 }
 
 # The Qt install under a libraries root, found by what the build needs -- a Qt6
@@ -157,7 +217,8 @@ function Invoke-Doctor {
         $blockers++
     }
 
-    Report 'architecture' "$Arch - libraries under $(Get-PreparedQtRoot)"
+    Report 'architecture' "$Arch ($ArchOrigin) - libraries under $(Get-PreparedQtRoot)"
+    Report 'spellings' "configure.bat $(Get-ConfigureArch), msbuild $(Get-MsbuildPlatform)"
     try {
         $drive = Get-Item $Root
         $freeGb = [math]::Round((Get-PSDrive $drive.PSDrive.Name).Free / 1GB)
@@ -172,8 +233,8 @@ function Invoke-Doctor {
         Report 'visual studio' "initialised ($env:VSINSTALLDIR)"
     } else {
         Report 'visual studio' 'NOT initialised - prepare and configure cannot run' -Blocking
-        Say  '                    open a terminal with the OLD toolset first:'
-        Say  '                      %comspec% /k "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=14.44'
+        Say  "                    open a terminal with the OLD toolset first ($Arch):"
+        Say  "                      $VcvarsHint"
         $blockers++
     }
 
@@ -211,6 +272,14 @@ function Invoke-Doctor {
     } else {
         Report 'prepared Qt' 'missing or half-written - -Stage prepare (~35GB, hours)' -Blocking
         $blockers++
+    }
+
+    # The one hazard of sharing a tree with a macOS build: x86 and arm64 use the
+    # same Libraries\ root that the macOS stages build in, and each stage starts by
+    # deleting its own directory. Reported here because it is a fact about the
+    # tree, not a failure -- the macOS build already produced stays usable.
+    if ($Arch -ne 'x64' -and (Find-PreparedQt (Join-Path $Root 'desktop\Libraries\local'))) {
+        Report 'macOS libraries' 'present in Libraries\ - a prepare here rebuilds them for Windows'
     }
 
     if (Test-Path (Join-Path $Up '.git')) {
@@ -317,9 +386,9 @@ if (-not $env:VSINSTALLDIR) {
     Die @"
 the Visual Studio environment is not initialised in this terminal.
 
-  Open a terminal with (adjust the edition/path for your install):
+  Open a terminal with ($Arch; adjust the edition/path for your install):
 
-    %comspec% /k "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=14.44
+    $VcvarsHint
 
   -vcvars_ver=14.44 is required: VS 2026's default v145 toolset does not support
   Windows 7, which Telegram Desktop still targets. See
@@ -435,8 +504,12 @@ function Assert-PreparedQt {
         Log "prepared Qt: $qt"
         return
     }
+    # The other root, for the architectures that do not share this one: x64 lives
+    # in Libraries\win64 while x86 and arm64 live in Libraries, so Qt found in the
+    # other place is a real answer ("prepared, but not for this architecture")
+    # rather than a missing install.
     $otherRoot = Join-Path $Root 'desktop\Libraries'
-    if ($Arch -eq 'x86') { $otherRoot = Join-Path $Root 'desktop\Libraries\win64' }
+    if ($Arch -eq 'x64') { $otherRoot = Join-Path $Root 'desktop\Libraries\win64' }
     $elsewhere = Find-PreparedQt $otherRoot
     if ($elsewhere) {
         Die @"
@@ -461,7 +534,22 @@ the static Qt the app links against is not installed.
 }
 
 function Invoke-Prepare {
-    Log 'preparing third-party libraries (hours, tens of GB)'
+    Log "preparing third-party libraries for $Arch (hours, tens of GB)"
+
+    # x86 and arm64 share Libraries\ with a macOS build -- only x64 gets its own
+    # root -- and every prepare stage starts by deleting its own directory there.
+    # So a prepare for one of those architectures rebuilds the library trees the
+    # macOS build used. The macOS *install* (Libraries\local) is not a stage
+    # directory and survives, so an app already built for macOS keeps working; a
+    # macOS rebuild re-fetches those libraries. Say so instead of letting it be
+    # discovered later.
+    if ($Arch -ne 'x64' -and (Find-PreparedQt (Join-Path $Root 'desktop\Libraries\local'))) {
+        Warn "this architecture shares Libraries\ with the macOS build in this tree:"
+        Warn '  prepare deletes and rebuilds each library directory there, so the macOS'
+        Warn '  library stages will have to be redone (its installed Qt in Libraries\local'
+        Warn '  is untouched). Use a separate clone of this repository for both.'
+    }
+
     Push-Location $Up
     try { & cmd /c 'Telegram\build\prepare\win.bat'; if ($LASTEXITCODE -ne 0) { Die 'prepare\win.bat failed' } }
     finally { Pop-Location }
@@ -484,12 +572,12 @@ function Invoke-Configure {
     Log "configuring for $Arch"
     Push-Location (Join-Path $Up 'Telegram')
     try {
-        # configure.bat takes the architecture as a bare first argument; x86 is
-        # its default and is spelled by omitting it.
-        # NOT $args: that is a reserved automatic variable in PowerShell, and
-        # assigning to it inside a function is a subtle way to get surprised.
-        $configureArgs = @()
-        if ($Arch -eq 'x64') { $configureArgs += 'x64' }
+        # configure.bat takes the architecture as a bare first argument, in ITS
+        # spelling ('arm' means ARM64 there, and x86 is its own default but also
+        # accepted). NOT $args: that is a reserved automatic variable in
+        # PowerShell, and assigning to it inside a function is a subtle way to get
+        # surprised.
+        $configureArgs = @(Get-ConfigureArch)
         $configureArgs += @('-D', "TDESKTOP_API_ID=$apiId", '-D', "TDESKTOP_API_HASH=$apiHash")
         & cmd /c "configure.bat $($configureArgs -join ' ')"
         if ($LASTEXITCODE -ne 0) { Die 'configure.bat failed' }
@@ -506,8 +594,8 @@ function Invoke-Build {
     # say what to open rather than pretending to build.
     $msbuild = Get-Command msbuild -ErrorAction SilentlyContinue
     if ($msbuild) {
-        Log 'building with msbuild (Release)'
-        & msbuild $sln /p:Configuration=Release /p:Platform=$Arch /m
+        Log "building with msbuild (Release, $(Get-MsbuildPlatform))"
+        & msbuild $sln /p:Configuration=Release /p:Platform=$(Get-MsbuildPlatform) /m
         if ($LASTEXITCODE -ne 0) { Die 'msbuild failed' }
         Log "result under $Up\out\Release"
     } else {

@@ -200,7 +200,7 @@ but the range of supported deployment target versions is 12.0 to 27.0.99.
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage doctor
 powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage prepare
-powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage configure -Arch x64
+powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage configure
 powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage build
 ```
 
@@ -208,6 +208,34 @@ powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage build
 סביבת Visual Studio, git/bash/Python 3, התקנת ה-Qt שהוכנה, שלמות ה-submodules
 ומצב `out\`. הוא רץ **לפני** הבדיקות שנכשלות בכוונה, כי התפקיד שלו הוא לדווח על
 מה שחסר ולא למות עליו.
+
+#### ארכיטקטורה — ב-Windows אין "universal"
+
+אין ב-Windows קובץ fat כמו ב-macOS: אין `lipo`, ו-ARM64X — PE אחד שנושא גם תצוגת
+Arm64 וגם תצוגת x64 — רץ **רק** על Windows on Arm, כך שהוא לא מחליף בנייה ל-x64.
+בנייה אחת היא ארכיטקטורה אחת, ו-upstream תומך בשלוש, שכל אחת מהן נכתבת אחרת בכל
+כלי:
+
+| `-Arch` | `Platform` (prepare.py) | `configure.bat` | `msbuild` | ספריות |
+|---|---|---|---|---|
+| `x86` | `x86` | `x86` | `Win32` | `Libraries\` |
+| `x64` | `x64` | `x64` | `x64` | `Libraries\win64\` |
+| `arm64` | `arm64` | `arm` | `ARM64` | `Libraries\` |
+
+ברירת המחדל, `-Arch auto`, קוראת את `$env:Platform` — בדיוק מה ש-prepare.py קורא
+— כך שסביבת Visual Studio קובעת את הארכיטקטורה של הספריות **ואת זו של האפליקציה**
+יחד. בקשה מפורשת של x64 כשה-prompt הוא ARM64 הייתה בונה את הספריות לארכיטקטורה
+אחת ואת האפליקציה לשנייה, וזה נכשל בקישור שעות אחר כך. לכן ה-`doctor` מדפיס איזו
+ארכיטקטורה נבחרה, מאיפה, ואיך היא נכתבת בכל אחד מהכלים.
+
+**מכאן ש"universal" ב-Windows פירושו שתי בנייות** (x64 ו-arm64), כל אחת מה-prompt
+שלה ועם `-Stage prepare` משל עצמה — ואז שני קבצים, לא אחד. כדאי לדעת גם ש-x64 הוא
+היחיד עם עץ ספריות נפרד: `x86` ו-`arm64` חולקים את `Libraries\` **עם בנייה של
+macOS**, וכל שלב של prepare מתחיל במחיקת התיקייה שלו שם. ה*התקנה* של macOS
+(`Libraries\local`) אינה תיקיית stage ולכן שורדת — אפליקציה שכבר נבנתה למאק
+תמשיך לעבוד, ובנייה חוזרת שלה תצטרך לבנות מחדש את אותן ספריות. לשני העולמות
+במקביל, בלי הפתעות: שני clones. (`doctor` מציג את זה כשורה משלו, ו-`prepare`
+מזהיר לפני שהוא נוגע במשהו.)
 
 **המכשלה שתופסת כל אחד:** הפקודות חייבות לרוץ בטרמינל שבו אותחלה סביבת
 Visual Studio **עם ה-toolset הישן**. ברירת המחדל של VS 2026 היא `v145` שלא
@@ -257,7 +285,7 @@ found". הסקריפט בודק את השורש של הארכיטקטורה המ
 |---|---|
 | המקורות וה-submodules | `desktop/upstream` — משותפים |
 | ספריות macOS | `desktop/Libraries/local`, וה-Qt ב-`local/Qt-6.11.1` |
-| ספריות Windows | `desktop/Libraries/win64` (x64), ה-Qt ב-`win64/Qt-6.11.1` |
+| ספריות Windows | x64: `desktop/Libraries/win64` (Qt ב-`win64/Qt-6.11.1`); x86 ו-arm64: `desktop/Libraries` |
 | פלט הבנייה | `desktop/upstream/out` — **משותף, ולכן לפלטפורמה אחת בכל רגע** |
 
 מה שכן צריך: `-Stage prepare` בצד Windows. זו בנייה **נפרדת** של Qt, FFmpeg,
@@ -266,6 +294,9 @@ OpenSSL ו-‎30 ספריות נוספות מה-build של macOS (‎~35GB מש�
 את `out/` שנבנה ב-macOS ויבנה מחדש, ובחזרה; החותמת של כל פלטפורמה שונה (`...|mac|12.0`
 מול `...|x64`), כך שההחלפה קורית פעם אחת, בהצהרה מפורשת, ולא כמצב לא-עקבי. אם
 שתי הבנייות צריכות להתקיים במקביל — שני clones.
+
+היוצא מן הכלל לשורה "ספריות Windows" שלמעלה: ל-`arm64` (ול-`x86`) אין עץ נפרד,
+והוא חולק את `Libraries\` עם ה-stages של macOS — ראו "ארכיטקטורה" למעלה.
 
 `bootstrap.sh --with-submodules` ו-`apply-overlay.sh` **לא** צריך להריץ שוב:
 ה-submodules כבר בעץ והעטיפה כבר הוחלה. הם אידמפוטנטיים, כך שהרצה חוזרת לא
