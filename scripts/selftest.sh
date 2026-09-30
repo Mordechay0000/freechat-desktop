@@ -507,6 +507,179 @@ else
   bad "stale fork path in:$(printf ' %s' $stale)"
 fi
 
+# --- macOS deployment target: resolved, not trusted -------------------------
+# The expensive failure this covers: Xcode refuses to build for a system its SDK
+# does not support -- "the range of supported deployment target versions is 12.0
+# to 27.0.99" -- and it says so only after prepare has spent half an hour on Qt.
+# Which values are supported is a property of the installed SDK and it MOVES:
+# this machine lost 12.0 and gained 10.13 in one day, when Xcode 27 beta was
+# replaced by 26.6. So the value from freechat.env is resolved against the SDK's
+# own SDKSettings.plist. The decision is a pure function, which is why it can be
+# tested here with fabricated ranges -- on Linux and Windows too, with no Xcode.
+vc="$(version_cmp 12.0 12) $(version_cmp 26.5.99 26.5) $(version_cmp 9.0 12.0) $(version_cmp 12.0 12.0.0)"
+if [[ "$vc" == "0 1 -1 0" ]]; then
+  ok "version_cmp compares components as numbers (12.0 == 12, 9.0 < 12.0)"
+else
+  bad "version_cmp: got '$vc', want '0 1 -1 0'"
+fi
+
+keep="$(mac_deployment_target_effective 12.0 12.0 27.0.99 27.0)"
+up="$(mac_deployment_target_effective 10.13 12.0 27.0.99 27.0)"
+down="$(mac_deployment_target_effective 30.0 12.0 27.0.99 27.0)"
+if [[ "$keep" == "12.0" && "$up" == "12.0" && "$down" == "27.0" ]]; then
+  ok "a target inside the SDK's range is kept; outside it, clamped to the range"
+else
+  bad "target resolution: in-range=$keep below-min=$up above-max=$down (want 12.0 12.0 27.0)"
+fi
+
+# The clamp is a version change in the shipped binary, so it must be explained
+# rather than silent -- and a value that is fine must produce no noise at all.
+note="$(mac_deployment_target_note 10.13 12.0 12.0 27.0.99 2>&1)"
+quiet="$(mac_deployment_target_note 12.0 12.0 12.0 27.0.99 2>&1)"
+if [[ "$note" == *"supported range here: 12.0 to 27.0.99"* && "$note" == *"building with 12.0 instead"* \
+      && "$note" == *"drops support for macOS older than 12.0"* && -z "$quiet" ]]; then
+  ok "an adapted target is explained, an unadapted one says nothing"
+else
+  bad "deployment target note: '$note' / quiet='$quiet'"
+fi
+
+# The SDK range comes from SDKSettings.plist, read with plutil -- the same file
+# Xcode reads. Checked against a synthetic one, so the test does not depend on
+# which Xcode is installed, and against the real SDK when there is one.
+if [[ "$(host_os)" == mac ]] && command -v plutil >/dev/null 2>&1; then
+  fake_sdk="$TMP/fake-sdk"; mkdir -p "$fake_sdk"
+  cat > "$fake_sdk/SDKSettings.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>SupportedTargets</key><dict><key>macosx</key><dict>
+    <key>MinimumDeploymentTarget</key><string>13.0</string>
+    <key>MaximumDeploymentTarget</key><string>29.9.99</string>
+    <key>DefaultDeploymentTarget</key><string>29.0</string>
+  </dict></dict>
+</dict></plist>
+PLIST
+  fake_range="$(mac_sdk_deployment_target_range "$fake_sdk")"
+  if [[ "$fake_range" == "13.0 29.9.99 29.0" ]]; then
+    ok "the SDK's supported target range is read from SDKSettings.plist"
+  else
+    bad "plist read: got '$fake_range', want '13.0 29.9.99 29.0'"
+  fi
+
+  # And the installed SDK: the rule, not a version. Whatever this Xcode supports,
+  # the resolved default has to land inside the range it reports -- that is the
+  # property the build depends on.
+  if real_range="$(mac_sdk_deployment_target_range)"; then
+    # shellcheck disable=SC2086
+    set -- $real_range
+    got="$(mac_deployment_target_effective 12.0 "$1" "$2" "${3:-$2}")"
+    if [[ "$(version_cmp "$got" "$1")" != "-1" && "$(version_cmp "$got" "$2")" != "1" ]]; then
+      ok "the installed SDK ($real_range) resolves the default target 12.0 to $got, inside it"
+    else
+      bad "resolved target $got is outside the installed SDK's range $1 to $2"
+    fi
+  else
+    printf '  \033[1;33m-\033[0m installed SDK range NOT READ (no SDK plist on this machine)\n'
+  fi
+else
+  printf '  \033[1;33m-\033[0m SDK plist checks NOT RUN (not macOS, or no plutil)\n'
+fi
+
+# --- prepared state: a half-installed Qt is not usable ----------------------
+# The exact state that produced "Neither Qt6 nor Qt5 is found" with no mention
+# of prepare: Libraries/local/Qt-6.11.1 present, holding one stray library and no
+# cmake config. Identified by what the build needs -- a Qt6 cmake config -- not by
+# the version in the directory name, which comes from upstream's qt_version.py.
+libs="$TMP/libs"; mkdir -p "$libs/local/Qt-6.11.1/lib/cmake/Qt6"
+touch "$libs/local/Qt-6.11.1/lib/cmake/Qt6/Qt6Config.cmake"
+if [[ "$(prepared_qt_dir "$libs")" == "$libs/local/Qt-6.11.1" ]]; then
+  ok "prepared_qt_dir finds a complete Qt install"
+else
+  bad "prepared_qt_dir missed a complete Qt install"
+fi
+rm "$libs/local/Qt-6.11.1/lib/cmake/Qt6/Qt6Config.cmake"
+if prepared_qt_dir "$libs" >/dev/null 2>&1; then
+  bad "prepared_qt_dir accepted a half-installed Qt (no Qt6Config.cmake)"
+else
+  ok "prepared_qt_dir rejects a half-installed Qt"
+fi
+if [[ -z "$(prepared_qt_dir "$TMP")" ]]; then
+  ok "prepared_qt_dir finds nothing where nothing is prepared"
+else
+  bad "prepared_qt_dir invented a Qt install"
+fi
+
+# free_space_gb: the check that warns before a stage runs out of disk mid-way.
+free_gb="$(free_space_gb "$TMP")"
+if [[ "$free_gb" =~ ^[0-9]+$ ]] && (( free_gb > 0 )); then
+  ok "free_space_gb reads the free space (${free_gb}GB)"
+else
+  bad "free_space_gb returned '$free_gb'"
+fi
+
+# --- submodules: a half-downloaded one is detected, and repaired -------------
+# "git submodule update" is idempotent and skips what is present, so running it
+# again is the repair. What it never reports is whether the result is complete --
+# an interrupted clone leaves a directory that exists and is EMPTY, and the build
+# fails hours later inside a missing header. Both halves are planted here the way
+# they happen: files deleted from an initialized submodule, and the whole
+# submodule directory gone.
+sub_remote="$TMP/sub-remote"; sub_self="$TMP/sub-self"
+mkdir -p "$sub_remote/src"
+echo "sub content" > "$sub_remote/SUB_FILE"
+echo "// header" > "$sub_remote/src/sub.h"
+git init -q "$sub_remote"
+git -C "$sub_remote" add -A
+git -C "$sub_remote" -c user.email=t@t -c user.name=t commit -q -m sub
+git init -q "$sub_self"
+export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=protocol.file.allow GIT_CONFIG_VALUE_0=always
+git -C "$sub_self" -c protocol.file.allow=always submodule add -q "$sub_remote" sub >/dev/null 2>&1
+git -C "$sub_self" -c user.email=t@t -c user.name=t commit -q -m "add submodule"
+git -C "$sub_self" submodule update --init --recursive >/dev/null 2>&1
+unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+
+if [[ "$(verify_submodules "$sub_self" check)" == "1" ]]; then
+  ok "a complete submodule tree verifies, and says how many"
+else
+  bad "verify_submodules miscounted a complete tree"
+fi
+plain="$TMP/plain"; git init -q "$plain"
+if [[ "$(verify_submodules "$plain" check)" == "0" ]]; then
+  ok "a repository without submodules verifies as zero"
+else
+  bad "verify_submodules mishandled a repository with no submodules"
+fi
+
+# Initialized, metadata intact, contents deleted: git status calls this fine.
+rm -rf "$sub_self/sub/SUB_FILE" "$sub_self/sub/src"
+if verify_submodules "$sub_self" check >/dev/null 2>&1; then
+  bad "a submodule with deleted files passed verification"
+else
+  ok "a submodule whose files were deleted is reported, not passed"
+fi
+if verify_submodules "$sub_self" repair >/dev/null 2>&1 && [[ -f "$sub_self/sub/src/sub.h" ]]; then
+  ok "repair restores a submodule whose files were deleted"
+else
+  bad "repair did not restore the submodule's files"
+fi
+
+# The whole directory gone: git reports it as not initialized, and one run of
+# update fetches it back (which is what re-running bootstrap does).
+rm -rf "$sub_self/sub"
+git -C "$sub_self" submodule deinit -q -f --all >/dev/null 2>&1
+if verify_submodules "$sub_self" check >/dev/null 2>&1; then
+  bad "a missing submodule passed verification"
+else
+  ok "a missing submodule is reported"
+fi
+export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=protocol.file.allow GIT_CONFIG_VALUE_0=always
+if verify_submodules "$sub_self" repair >/dev/null 2>&1 && [[ -f "$sub_self/sub/SUB_FILE" ]]; then
+  ok "repair fetches a submodule that is not checked out at all"
+else
+  bad "repair did not fetch the missing submodule"
+fi
+unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+
 # --- idempotency of apply-overlay, per bootstrapped platform ---------------
 # The rule this enforces: a second run must leave the tree exactly as the first
 # did. Asserted by fingerprinting the applied tree -- tracked modifications and

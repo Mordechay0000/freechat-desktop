@@ -24,15 +24,25 @@ Windows). אין להם מקבילה ב-PowerShell במכוון: הם אותו �
 ./scripts/build-desktop.sh all                # לינוקס (דרך Docker) או macOS
 ```
 ```powershell
-powershell -ExecutionPolicy Bypass -File scriptsuild-desktop.ps1 -Stage all
+powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage all
 ```
 
-דרישות מלאות לפי מערכת, כולל מלכודת ה-`-vcvars_ver=14.44` ב-Windows:
+לפני כן, ובכל שלב, אפשר לבדוק מה חסר בלי לשנות דבר:
+
+```bash
+./scripts/build-desktop.sh doctor
+```
+
+הוא מדפיס את שרשרת הכלים (Xcode, SDK, טווח ה-deployment targets), מצב ה-Qt
+שהוכן, שלמות ה-submodules ומקום בדיסק — כל אחת מהבדיקות האלה נולדה מכשל אמיתי
+שעלה שעות. דרישות מלאות לפי מערכת, כולל מלכודת ה-`-vcvars_ver=14.44` ב-Windows:
 **`docs/10-DESKTOP.md`**.
 
-**הבנייה עצמה לא אומתה** — `prepare/*` מקמפל Qt, FFmpeg ו-OpenSSL, עשרות GB,
-והסביבה שבה נכתב ה-overlay לא הכילה אותם. ה-overlay אומת בהרצה ובקריאת קוד.
-כשל ראשון הוא כנראה פער בשרשרת הכלים ולא overlay שבור.
+**הבנייה של macOS אומתה מקצה לקצה** (2026-09-30): `prepare` בנה Qt 6.11.1
+בכ-30 דקות, ו-`out/Release/FreeChat.app` נוצר — אוניברסלי x86_64+arm64, 1.6GB,
+חתום ad-hoc. **לינוקס ו-Windows עדיין לא הורצו** (אין docker ואין Visual Studio
+בסביבה שבה נכתב הריפו); שם ה-overlay אומת בקריאת קוד, וכשל ראשון הוא כנראה פער
+בשרשרת הכלים ולא overlay שבור.
 
 ## שתי אסימטריות מול אנדרואיד — שתיהן אומתו בקוד
 

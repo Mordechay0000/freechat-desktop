@@ -65,7 +65,7 @@ hook אחד מכסה גם הפעלה ראשונה (דרך `StartWidget`) וגם 
 | bash | יש | יש | **Git for Windows** — ראה למטה |
 | Python 3 | חבילת המערכת | מגיע עם CLT | python.org, לסמן "Add to PATH" |
 | נוסף | `docker`, `poetry` | `brew` | — |
-| דיסק | ~60GB | ~60GB | ~60GB |
+| דיסק | ~60GB | **~35GB ל-prepare ועוד ~10GB לבנייה** | ~60GB |
 
 ### שלב מקדים משותף — וההערה שחייבת להיאמר על Windows
 
@@ -118,7 +118,8 @@ upstream בונה לינוקס **בתוך קונטיינר משלו**, לא בש
 ### macOS
 
 ```bash
-./scripts/build-desktop.sh prepare     # brew + xcode-select + prepare/mac.sh
+./scripts/build-desktop.sh doctor      # מה חסר, בלי לשנות דבר
+./scripts/build-desktop.sh prepare     # brew (רק מה שחסר) + prepare/mac.sh
 ./scripts/build-desktop.sh configure
 ./scripts/build-desktop.sh build
 ```
@@ -126,6 +127,73 @@ upstream בונה לינוקס **בתוך קונטיינר משלו**, לא בש
 דורש **Xcode מלא**, לא רק command line tools. הבנייה עוברת דרך
 `cmake --build`, כך שהיא עובדת בין אם `configure.sh` בחר Xcode או ninja, ובלי
 לפתוח את ה-GUI. לחלופין: `out/Telegram.xcodeproj` ב-Xcode.
+
+**מדידות מהרצה אמיתית** (2026-09-30, 10 ליבות): `prepare` — כ-30 דקות, שיא של
+~35GB (26GB עץ בנייה של Qt ועוד התקנה של 8.3GB). `configure` — ~70 שניות.
+`build` — כ-30 דקות, `out/` 9.4GB, והתוצר `out/Release/FreeChat.app` —
+אוניברסלי x86_64+arm64, 1.6GB, חתום ad-hoc.
+
+#### תאימות: Xcode מול ה-deployment target
+
+Xcode מסרב לבנות למערכת שה-SDK שלו לא תומך בה, ובשגיאה מפורשת:
+
+```
+error: The macOS deployment target 'MACOSX_DEPLOYMENT_TARGET' is set to 12.0,
+but the range of supported deployment target versions is 12.0 to 27.0.99.
+```
+
+הטווח הזה הוא תכונה של ה-SDK ולא קבוע: באותה מכונה הוא עבר מ-`12.0 ומעלה`
+(Xcode 27 בטא) ל-`10.13 עד 26.5.99` (Xcode 26.6) בתוך יום. לכן
+`FREECHAT_MACOS_DEPLOYMENT_TARGET` (ברירת מחדל `12.0`) **נפתר מול ה-SDK המותקן**
+במקום להילקח כמובן מאליו: הטווח נקרא מ-`SDKSettings.plist` — בדיוק הקובץ ש-Xcode
+קורא — ואם הערך מחוץ לטווח הוא מותאם לגבול הקרוב, עם הסבר מה זה משנה:
+
+- **מתחת לרצפה** — Xcode לא יבנה בכלל, אז המטרה עולה לרצפה. זה **מוותר על תמיכה
+  במק ישן יותר**, וההודעה אומרת זאת במפורש.
+- **מעל התקרה** — אין SDK למערכת חדשה יותר, אז המטרה יורדת לגרסת ה-SDK עצמו.
+
+שני הצדדים — `prepare.py` עבור הספריות ו-`CMAKE_OSX_DEPLOYMENT_TARGET` עבור
+האפליקציה — קוראים לאותו פותר, ואם `prepare.py` נכתב עם ערך אחר (למשל Xcode
+הוחלף בינתיים) `build` נעצר עם הסבר, במקום להיכשל בקישור בתוך ספרייה.
+
+**ו-`sudo` לא רץ מכאן.** `xcode-select -s` דורש סיסמה, מה שהופך בנייה לא-אינטראקטיבית
+לתלייה, ולכן הסקריפטים בודקים `xcodebuild -version` ומדפיסים את הפקודה שצריך
+להריץ ידנית אם Xcode לא נבחר. `xcode-select -p` שמצביע נכון הוא המצב הרגיל ואז
+אין מה להריץ.
+
+#### "Neither Qt6 nor Qt5 is found" — מה זה אומר
+
+זו שגיאת cmake, והיא מתארת סימפטום ולא סיבה. במאק האפליקציה מקשרת Qt **סטטי**
+ש-`prepare.py` מתקין ל-`desktop/Libraries/local/Qt-<version>`, ולכן המסר אומר
+שההתקנה הזו חסרה או חצי-כתובה. בדרך כלל היא חסרה לגמרי: שלב ה-Qt של `prepare.py`
+מתחיל ב-`rm -rf qt_<version>`, כך שהרצה שנקטעת (דיסק מלא, Ctrl-C, רשת שנופלת)
+משאירה אפס Qt — ומפתח ה-cache, שנכתב רק בהצלחה, לא נכתב. `build-desktop.sh`
+בודק את זה לפני configure ומדפיס את הסיבה והתיקון במקום להעביר הלאה את המסר
+של cmake. התיקון: `./scripts/build-desktop.sh prepare` (~30 דקות, ~35GB פנויים).
+
+#### בדיקות שהסקריפטים מריצים לבד
+
+| בדיקה | מה היא תופסת |
+|---|---|
+| Xcode מלא + טווח ה-deployment targets | `sudo xcode-select` שנדרש, ומטרה ש-Xcode לא יבנה |
+| התקנת Qt מוכנה (`Qt6Config.cmake`) | "Neither Qt6 nor Qt5 is found", לפני שהוא מופיע |
+| שלמות ה-submodules (`git submodule status`) | הורדה שנקטעה באמצע, שנכשלת בשעות שאחריה |
+| חתימת שרשרת הכלים של הספריות | ספריות סטטיות שנבנו עם SDK אחר (`_dup3` מול SDK 27) |
+| מקום בדיסק מול המדידה | בנייה שנגמרת באמצע — ומתחילה מאפס בהרצה הבאה |
+
+`doctor` מריץ את כולן ומדפיס דוח, בלי לשנות דבר; שאר השלבים מריצים את שלהן
+ומפסיקים עם הסבר. כל אחת מהן זולה באותם סדרי גודל של ההמתנה שהיא חוסכת.
+
+#### ה-submodules לעולם לא "חצי"
+
+`git submodule update` אידמפוטנטי — הוא מושך מה שחסר ומדלג על מה שקיים — ולכן
+התיקון של הורדה שנקטעה הוא פשוט להריץ אותו שוב. מה שהוא **לא** עושה זה לדווח אם
+התוצאה שלמה: clone שנהרג באמצע משאיר תיקייה שקיימת וריקה, והבנייה נכשלת שעות
+אחר כך בתוך header שמישהו מחק בלי כוונה. לכן `bootstrap.sh --with-submodules`
+מריץ אחריו `git submodule status --recursive` (git עצמו עונה: `-` לא מאותחל,
+`+` קומיט אחר מזה שנרשם) ומסרב להכריז הצלחה על עץ שהוא רק חלקית שם. `prepare`
+בודק את אותו הדבר עם `repair`, שמשלים גם קבצים שנמחקו מתת-מודול מאותחל —
+מקרה שבו `git submodule update` לא עושה כלום, כי הוא משווה קומיטים ולא worktree.
 
 ### Windows
 
@@ -172,15 +240,22 @@ Visual Studio **עם ה-toolset הישן**. ברירת המחדל של VS 2026 �
 (`freechat.env` → `FREECHAT_SERVER_RSA_PUB`), בלי תעודות ובלי TLS. התעודות משנות
 רק ל-HTTPS שהאפליקציה עושה בצד.
 
-## מה לא אומת, במפורש
+## מה אומת ומה לא, במפורש
 
-**אף אחת משלוש הבנייות לא הורצה מקצה לקצה.** `prepare/*` מקמפל Qt, FFmpeg
-ו-OpenSSL — עשרות GB מול 11GB שהיו פנויים בסביבה שבה נכתב הקוד. לכן ה-overlay
-אומת בקריאת קוד, והסקריפטים בקריאת התיעוד של upstream.
+**macOS הורצה מקצה לקצה** (2026-09-30): `prepare` בנה Qt 6.11.1 סטטי (Release +
+Debug, `x86_64;arm64`), `configure` עבר, ו-`build` הפיק
+`out/Release/FreeChat.app` — אוניברסלי, 1.6GB, חתום ad-hoc, `codesign --verify`
+עובר, והבינארי לא תלוי בשום ספרייה שאינה של המערכת (Qt סטטי). המספרים למעלה.
 
-**מה כן אומת:** `apply-overlay.sh desktop` רץ בהצלחה, גזר את הכתובת נכון
+מה שזה לא מכסה: ההרצה עצמה לא נבדקה (האפליקציה לא הופעלה), ו**לינוקס ו-Windows
+עוד לא הורצו** — אין docker ואין Visual Studio בסביבה הזו. שם ה-overlay אומת
+בקריאת קוד והסקריפטים בקריאת התיעוד של upstream.
+
+**מה כן אומת קודם:** `apply-overlay.sh desktop` רץ בהצלחה, גזר את הכתובת נכון
 (`freechat.forum-dev.com:8080` — hostname, בניגוד לאנדרואיד), ועובר דרך כל 30
-קריאות ה-Python בפותר השמות. אידמפוטנטיות שלושת ה-overlays מאומתת ב-selftest.
+קריאות ה-Python בפותר השמות. אידמפוטנטיות שלושת ה-overlays מאומתת ב-selftest,
+וכמוה גם לוגיקת התאימות החדשה (טווח ה-deployment targets, זיהוי Qt חצי-מותקן,
+ושלמות submodules) — בלי Xcode ובלי רשת.
 
 **`build-desktop.ps1`: מתפרסר נקי ב-PowerShell 7.4.6** (ה-parser של PowerShell
 עצמו, 0 שגיאות), ושני הבלוקים הלוגיים שלו — קריאת `freechat.env` וזיהוי Python —

@@ -197,13 +197,28 @@ apply_desktop() {
   log "desktop: branding -> $BRAND_NAME @ $BRAND_SERVER_ADDRESS"
 
   # macOS deployment target for the libraries prepare/mac.sh builds. The app's
-  # own target is passed to cmake by build-desktop.sh; both read the same key so
-  # they cannot disagree, which would be a link error. prepare.py is inside the
-  # reset scope, so each run patches the pristine 10.13 -- a changed value in
+  # own target is passed to cmake by build-desktop.sh; both resolve it the same
+  # way so they cannot disagree, which would be a link error. prepare.py is inside
+  # the reset scope, so each run patches the pristine 10.13 -- a changed value in
   # freechat.env takes effect on the next apply.
-  local mac_min="${FREECHAT_MACOS_DEPLOYMENT_TARGET:-12.0}"
-  [[ "$mac_min" =~ ^[0-9]+(\.[0-9]+)*$ ]] \
-    || die "FREECHAT_MACOS_DEPLOYMENT_TARGET='$mac_min' is not a version like 12.0"
+  #
+  # Within the SDK's supported range, not on trust: Xcode refuses to build for a
+  # system its SDK does not list, and it says so only after prepare has spent half
+  # an hour on Qt. The range comes from the SDK's own SDKSettings.plist via
+  # scripts/lib/portable.sh, and the value is adapted (with the reason printed) so
+  # the build continues instead of stopping.
+  local mac_min requested range min max def
+  requested="${FREECHAT_MACOS_DEPLOYMENT_TARGET:-12.0}"
+  [[ "$requested" =~ ^[0-9]+(\.[0-9]+)*$ ]] \
+    || die "FREECHAT_MACOS_DEPLOYMENT_TARGET='$requested' is not a version like 12.0"
+  mac_min="$requested"
+  if [[ "$(host_os)" == mac ]] && range="$(mac_sdk_deployment_target_range)"; then
+    # shellcheck disable=SC2086  # a "min max default" triple, split on purpose.
+    set -- $range
+    min=$1; max=$2; def=${3:-$2}
+    mac_min="$(mac_deployment_target_effective "$requested" "$min" "$max" "$def")"
+    mac_deployment_target_note "$requested" "$mac_min" "$min" "$max" >&2
+  fi
   py_run - "$up/Telegram/build/prepare/prepare.py" "$mac_min" <<'PYMAC' \
     || die "could not set the macOS deployment target in prepare.py"
 import sys
@@ -217,7 +232,59 @@ for old, new in pairs:
     t = t.replace(old, new)
 open(path, "w", encoding="utf-8").write(t)
 PYMAC
-  log "desktop: macOS deployment target -> $mac_min"
+  if [[ "$mac_min" == "$requested" ]]; then
+    log "desktop: macOS deployment target -> $mac_min"
+  else
+    log "desktop: macOS deployment target -> $mac_min (adapted; freechat.env asks for $requested)"
+  fi
+
+  # The environment variable is not enough for breakpad: its .xcodeproj files
+  # set MACOSX_DEPLOYMENT_TARGET=10.13 themselves, and Xcode rejects that ("the
+  # range of supported deployment target versions is 12.0 to ..."). A build
+  # setting on the xcodebuild command line overrides the project's.
+  local xcb
+  for xcb in \
+    'xcodebuild -project processor.xcodeproj -target minidump_stackwalk -configuration Release build' \
+    'xcodebuild -project Breakpad.xcodeproj -target Breakpad -configuration Debug build' \
+    'xcodebuild -project Breakpad.xcodeproj -target Breakpad -configuration Release build' \
+    'xcodebuild -project dump_syms.xcodeproj -target dump_syms -configuration Release build'; do
+    py_run "$HOOK" "$up/Telegram/build/prepare/prepare.py" \
+      "    $xcb
+" "    $xcb MACOSX_DEPLOYMENT_TARGET=\$MACOSX_DEPLOYMENT_TARGET
+"
+  done
+  # Qt enables dup3() when the SDK declares it, and the macOS 27 SDK does -- but
+  # dup3 does not exist on any macOS the app targets. The result was a
+  # libQt6Core.a that references _dup3: it fails to link against an older SDK
+  # ("Undefined symbols: _dup3") and would fail to load on older macOS. Qt falls
+  # back to dup2 + fcntl, which is what every macOS before 27 uses anyway.
+  py_run "$HOOK" "$up/Telegram/build/prepare/prepare.py" \
+    '        -no-feature-futimens \
+' '        -no-feature-futimens \
+        -no-feature-dup3 \
+'
+  # prepare.py exports CMAKE_GENERATOR=Ninja on macOS, but Qt's
+  # -debug-and-release build is Ninja Multi-Config. CMake 4.x hands the
+  # environment's generator to try_compile's test projects, which then fail
+  # ("This should not have happened ... Failed to configure test project build
+  # system", or "x86 intrinsics support missing"), and Qt's configure stops.
+  py_run "$HOOK" "$up/Telegram/build/prepare/prepare.py" \
+    'mac:
+    ./configure -prefix "$USED_PREFIX/Qt-$QT" \
+' 'mac:
+    export CMAKE_GENERATOR="Ninja Multi-Config"
+    ./configure -prefix "$USED_PREFIX/Qt-$QT" \
+'
+  # libheif builds its gdk-pixbuf loader whenever it finds gdk-pixbuf, and on a
+  # Mac with Homebrew it does -- an arm64-only copy, so the universal
+  # (x86_64;arm64) link fails with "symbol(s) not found for architecture
+  # x86_64". The loader is never used by the app.
+  py_run "$HOOK" "$up/Telegram/build/prepare/prepare.py" \
+    '        -D WITH_EXAMPLES=OFF
+    cmake --build . --config MinSizeRel' \
+    '        -D WITH_EXAMPLES=OFF \\
+        -D WITH_GDK_PIXBUF=OFF
+    cmake --build . --config MinSizeRel'
 
   local header="$up/Telegram/SourceFiles/freechat/freechat_builtin.h"
   py_run - "$header" "$BRAND_NAME" "${BRAND_SERVER_DESCRIPTION:-}" \

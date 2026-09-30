@@ -74,6 +74,29 @@ wants() {
   [[ "$ONLY" == all || "$ONLY" == "$1" ]]
 }
 
+# Submodules are opt-in and enormous, and git's own update IS the repair: it
+# fetches what is missing and skips what is already there, so an interrupted run
+# is continued by running the same command again. What it does not report is
+# whether the tree ended up complete -- a clone killed halfway leaves a directory
+# that exists and is empty, and the build then fails hours later, inside a header
+# nobody deleted on purpose -- so this asks git afterwards (verify_submodules in
+# scripts/lib/portable.sh) and refuses to report success for a tree that is only
+# part there.
+fetch_submodules() {
+  local name=$1 dest=$2 count
+  log "$name: submodules (this is the slow part)"
+  git -C "$dest" submodule update --init --recursive --depth 1 \
+    || die "$name: submodule update failed.
+      Re-run this script: git resumes and skips the submodules it already has."
+  if ! count="$(verify_submodules "$dest" check)"; then
+    die "$name: the submodules listed above are not fully checked out.
+      Re-run this script to continue -- git only fetches what is missing. If the
+      same one keeps failing:
+        git -C $dest submodule update --init --recursive"
+  fi
+  log "$name: $count submodules verified"
+}
+
 fetched=0
 
 fetch_pinned() {
@@ -171,9 +194,7 @@ fetch_pinned() {
   if [[ "$(git -C "$dest" rev-parse HEAD 2>/dev/null || true)" == "$COMMIT" ]]; then
     log "$name already at ${COMMIT:0:12}"
     if [[ "$submodules" == "yes" ]]; then
-      log "$name: submodules (this is the slow part)"
-      git -C "$dest" submodule update --init --recursive --depth 1 \
-        || die "$name: submodule update failed"
+      fetch_submodules "$name" "$dest"
     fi
     return
   fi
@@ -197,9 +218,7 @@ fetch_pinned() {
   git -C "$dest" checkout -q --force FETCH_HEAD
 
   if [[ "$submodules" == "yes" ]]; then
-    log "$name: submodules (this is the slow part)"
-    git -C "$dest" submodule update --init --recursive --depth 1 \
-      || die "$name: submodule update failed"
+    fetch_submodules "$name" "$dest"
   fi
 
   log "$name: at $(git -C "$dest" rev-parse --short HEAD)"

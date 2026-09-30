@@ -150,3 +150,271 @@ py_run() {
 }
 
 resolve_python || true
+
+# --- macOS toolchain --------------------------------------------------------
+#
+# Two places set the macOS deployment target -- prepare.py for the ~30 libraries
+# it builds, and CMAKE_OSX_DEPLOYMENT_TARGET for the app -- and when the installed
+# Xcode stops supporting that value it refuses to build:
+#
+#   error: The macOS deployment target 'MACOSX_DEPLOYMENT_TARGET' is set to
+#   12.0, but the range of supported deployment target versions is 12.0 to
+#   27.0.99   (Xcode 27 beta; Xcode 26.6 accepts 10.13 to 26.5.99)
+#
+# The floor moves: this machine lost 12.0 and gained 10.13 in a single day when
+# Xcode 27 beta was replaced by 26.6. So the supported range is read from the
+# SDK's own SDKSettings.plist -- the file Xcode itself reads -- and the decision
+# is a pure function, so scripts/selftest.sh can drive it with a fabricated range
+# instead of needing an Xcode to test against.
+#
+# These live in portable.sh rather than in a lib/ file of their own on purpose.
+# The split repositories copy scripts/lib file by file (scripts/split-repos.sh in
+# the monorepo), so a new file that nobody added to that list makes every desktop
+# script die at its source line, in a repository whose scripts are otherwise fine.
+# One file fewer to remember in two places.
+
+# version_cmp <a> <b>  --  print -1, 0 or 1.
+#
+# Missing components are 0, so "12.0" == "12" and "26.5.99" > "26.5". Only the
+# first four components are looked at, which is more than macOS versions have.
+# Deliberately not `sort -V`: BSD sort does not have it.
+version_cmp() {
+  local -a a b
+  local i x y
+  # Split on '.' by reading them as arrays with IFS set for the read only, which
+  # leaves the caller's IFS alone. A string compare would order 9.0 above 12.0.
+  IFS=. read -r -a a <<< "$1"
+  IFS=. read -r -a b <<< "$2"
+  for i in 0 1 2 3; do
+    x="${a[i]:-0}"; y="${b[i]:-0}"
+    # Anything that is not a digit is dropped, so a value read from a config file
+    # with a stray space cannot compare as unequal to its own spelling.
+    x="${x//[!0-9]/}"; y="${y//[!0-9]/}"
+    : "${x:=0}"; : "${y:=0}"
+    [ "$x" -gt "$y" ] && { printf '1'; return 0; }
+    [ "$x" -lt "$y" ] && { printf '%s' -1; return 0; }
+  done
+  printf '0'
+}
+
+# mac_sdk_path  --  print the SDK Xcode will use; nothing on other systems.
+mac_sdk_path() {
+  command -v xcrun >/dev/null 2>&1 || return 1
+  xcrun --show-sdk-path 2>/dev/null
+}
+
+# mac_sdk_deployment_target_range [sdk]  --  print "<min> <max> <default>".
+#
+# From SDKSettings.plist, which is where Xcode gets the range it enforces.
+# Returns non-zero when it cannot be read -- not macOS, no plutil, an SDK without
+# SupportedTargets -- and callers must treat that as "cannot check", not "fine".
+mac_sdk_deployment_target_range() {
+  local sdk=${1:-}
+  local plist min max def
+  [ -n "$sdk" ] || sdk="$(mac_sdk_path)" || true
+  [ -n "$sdk" ] || return 1
+  plist="$sdk/SDKSettings.plist"
+  [ -f "$plist" ] || return 1
+  command -v plutil >/dev/null 2>&1 || return 1
+  min="$(plutil -extract SupportedTargets.macosx.MinimumDeploymentTarget raw -o - "$plist" 2>/dev/null || true)"
+  max="$(plutil -extract SupportedTargets.macosx.MaximumDeploymentTarget raw -o - "$plist" 2>/dev/null || true)"
+  def="$(plutil -extract SupportedTargets.macosx.DefaultDeploymentTarget raw -o - "$plist" 2>/dev/null || true)"
+  [ -n "$min" ] && [ -n "$max" ] || return 1
+  printf '%s %s %s\n' "$min" "$max" "${def:-$max}"
+}
+
+# mac_deployment_target_effective <requested> <min> <max> [<default>]  --  print
+# the value to build with.
+#
+# Pure: no messages and no toolchain, so the self-test drives it with a
+# fabricated range. Clamped rather than rejected, because the alternatives are a
+# documented nearby value and no build at all: below the SDK's floor Xcode
+# refuses to build, and above its ceiling there is no SDK for the newer system.
+# Clamping up drops support for older macOS, which is not a decision to take
+# quietly -- the caller prints mac_deployment_target_note, and both callers
+# resolve the same way, so the libraries and the app cannot disagree.
+mac_deployment_target_effective() {
+  local want=$1 min=$2 max=$3 def=${4:-$3}
+  if [ -n "$min" ] && [ "$(version_cmp "$want" "$min")" = "-1" ]; then
+    printf '%s' "$min"
+    return 0
+  fi
+  if [ -n "$max" ] && [ "$(version_cmp "$want" "$max")" = "1" ]; then
+    # Above the ceiling. The SDK's default is its own version (26.5 for the 26.5
+    # SDK) -- what an unset deployment target means anyway -- and max is that
+    # version's ".99" spelling, which Xcode allows but which reads oddly in the
+    # binary's LC_BUILD_VERSION.
+    [ "$(version_cmp "$def" "$max")" = "1" ] && def=$max
+    printf '%s' "$def"
+    return 0
+  fi
+  printf '%s' "$want"
+}
+
+# mac_deployment_target_note <requested> <effective> <min> <max>  --  the why.
+#
+# Called wherever the target is resolved, so apply-overlay (which writes it into
+# prepare.py for the libraries) and build-desktop (which passes it to cmake for
+# the app) explain a version change in the same words.
+mac_deployment_target_note() {
+  local want=$1 got=$2 min=$3 max=$4
+  [ "$want" = "$got" ] && return 0
+  printf 'the macOS deployment target %s is not one this Xcode can build for.\n' "$want"
+  printf '  supported range here: %s to %s\n' "$min" "$max"
+  printf '  building with %s instead.\n' "$got"
+  if [ "$(version_cmp "$got" "$want")" = "1" ]; then
+    printf '  That drops support for macOS older than %s: this SDK has no lower\n' "$got"
+    printf '  floor, so no build can keep %s.\n' "$want"
+  else
+    printf '  No SDK here can target anything newer than %s; upgrade Xcode for that.\n' "$max"
+  fi
+  printf '  To choose a different value: FREECHAT_MACOS_DEPLOYMENT_TARGET in freechat.env\n'
+}
+
+# mac_require_xcode  --  full Xcode, or an explanation and a non-zero return.
+#
+# Full Xcode and not the command line tools: prepare builds Qt with xcodebuild,
+# and the app links against the SDK's static libraries. `xcodebuild -version` is
+# the test because it is the capability that matters -- on a CLT-only machine the
+# command exists and exits non-zero with "requires Xcode".
+#
+# Deliberately does NOT run `sudo xcode-select -s`, which is what upstream's own
+# flow does: it needs a password, so in any unattended run (CI, an agent, a
+# terminal without a tty) it either hangs or fails, and a build that begins by
+# asking for a password is one that cannot be automated at all. The command is
+# printed instead; running it twice is harmless.
+mac_require_xcode() {
+  local dev
+  xcodebuild -version >/dev/null 2>&1 && return 0
+  dev="$(xcode-select -p 2>/dev/null || true)"
+  printf 'error: full Xcode is required, not just the command line tools.\n' >&2
+  printf '  xcode-select currently points at: %s\n' "${dev:-<nothing>}" >&2
+  printf '  Install Xcode, then select it:\n' >&2
+  printf '    sudo xcode-select -s /Applications/Xcode.app/Contents/Developer\n' >&2
+  printf '  Run that yourself: this script never calls sudo, and that is on purpose --\n' >&2
+  printf '  it needs a password, which turns an unattended run into a hang.\n' >&2
+  return 1
+}
+
+# --- git tree completeness --------------------------------------------------
+
+# _submodule_problems <repo>  --  one line per submodule that is not fully there.
+_submodule_problems() {
+  local repo=$1
+  local line state rest path head_file
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    # `git submodule status` output: <state><40-char sha> <path> (<describe>).
+    state="${line:0:1}"
+    rest="${line:42}"
+    path="${rest%% (*}"
+    case "$state" in
+      -) printf 'not checked out: %s\n' "$path"; continue ;;
+      +) printf 'commit differs from the pin: %s\n' "$path"; continue ;;
+      U) printf 'unresolved merge: %s\n' "$path"; continue ;;
+    esac
+    # Initialized. status trusts the directory, so ask the worktree: a submodule
+    # whose contents were deleted still reports as present, and the build then
+    # fails hours later inside a header nobody deleted on purpose.
+    # `git ls-files | head -1` instead of `sed -n 1p` would be killed by SIGPIPE
+    # under `set -o pipefail` in the callers, and an empty answer here reads as
+    # "this submodule has no files".
+    head_file="$(git -C "$repo/$path" ls-files 2>/dev/null | sed -n 1p)"
+    if [ -z "$head_file" ]; then
+      printf 'no tracked files: %s\n' "$path"
+    elif [ ! -e "$repo/$path/$head_file" ]; then
+      printf 'files missing (e.g. %s): %s\n' "$head_file" "$path"
+    fi
+  done < <(git -C "$repo" submodule status --recursive 2>/dev/null)
+}
+
+# _submodule_restore_deleted <repo>  --  put back files missing from submodules.
+#
+# `git submodule update` compares COMMITS, not worktrees: for a submodule already
+# at the recorded commit it does nothing at all. That is exactly the state after
+# someone deletes files to free space -- the accident that emptied this project's
+# Qt tree -- and the build then fails on a header nobody removed on purpose.
+#
+# Only files git reports as deleted are restored. `git checkout -- .` would also
+# throw away real modifications, and there ARE real modifications inside
+# submodules here: the overlay edits Telegram/SourceFiles, which lives in one.
+_submodule_restore_deleted() {
+  local repo=$1
+  git -C "$repo" submodule foreach --quiet --recursive '
+    deleted="$(git ls-files --deleted)"
+    if [ -n "$deleted" ]; then
+      printf "  restoring files deleted from submodule %s\n" "$sm_path" >&2
+      printf "%s\n" "$deleted" | while IFS= read -r f; do
+        [ -n "$f" ] && git checkout -- "$f"
+      done
+    fi
+  ' || true
+}
+
+# verify_submodules <repo> [repair]  --  print the submodule count, or fail.
+#
+# `git submodule update` is idempotent -- it fetches what is missing and skips
+# what is already there -- so running it again IS the repair for an interrupted
+# download. What it does not do is say whether the tree ended up complete, and
+# the failure mode is quiet: a clone killed halfway leaves a directory that
+# exists and is empty, and the build fails hours later with a missing header.
+# `git submodule status` is git's own answer (see _submodule_problems).
+#
+# With `repair` the update runs once when problems are found and the tree is
+# re-checked; without it the tree is only reported on. Problems go to stderr, the
+# number of submodules verified to stdout, and a non-zero return means the build
+# should not start.
+verify_submodules() {
+  local repo=$1
+  local action=${2:-check}
+  local probs total
+  [ -d "$repo" ] || return 0
+  probs="$(_submodule_problems "$repo")"
+  if [ -n "$probs" ] && [ "$action" = "repair" ]; then
+    printf '  submodules are incomplete:\n%s' "$probs" >&2
+    printf '  running git submodule update --init --recursive (git skips what is present)\n' >&2
+    git -C "$repo" submodule update --init --recursive --depth 1 >&2 \
+      || {
+        printf '  git submodule update failed. A dropped network is the usual cause;\n' >&2
+        printf '  re-run the same command, which resumes rather than restarting.\n' >&2
+        return 1
+      }
+    # update() only handles submodules that are missing or at the wrong commit;
+    # this handles the ones that are simply incomplete on disk.
+    _submodule_restore_deleted "$repo"
+    probs="$(_submodule_problems "$repo")"
+  fi
+  if [ -n "$probs" ]; then
+    printf '  submodules are still incomplete after the check:\n%s' "$probs" >&2
+    printf '  Repair: git -C %s submodule update --init --recursive\n' "$repo" >&2
+    return 1
+  fi
+  total="$(git -C "$repo" submodule status --recursive 2>/dev/null | grep -c . || true)"
+  printf '%s' "$total"
+}
+
+# --- prepared state ---------------------------------------------------------
+
+# prepared_qt_dir <libraries-dir>  --  print the Qt install prepare.py built.
+#
+# The directory name carries upstream's Qt version (Qt-6.11.1), which comes from
+# upstream's Telegram/build/qt_version.py and changes when upstream bumps it. So
+# the check is for the thing the build needs -- a Qt6 cmake config inside a Qt-*
+# directory -- rather than for a name this script would have to keep in sync.
+prepared_qt_dir() {
+  local libs=$1
+  local d
+  for d in "$libs"/local/Qt-*; do
+    [ -d "$d" ] || continue
+    [ -f "$d/lib/cmake/Qt6/Qt6Config.cmake" ] && { printf '%s' "$d"; return 0; }
+  done
+  return 1
+}
+
+# free_space_gb <path>  --  free space in whole GB, or nothing when unknown.
+#
+# POSIX df -Pk, because macOS, Linux and Git Bash agree on that one and not on
+# the layout of the human-readable -h output.
+free_space_gb() {
+  df -Pk "$1" 2>/dev/null | awk 'NR==2 { printf "%d", $4 / 1048576 }'
+}
