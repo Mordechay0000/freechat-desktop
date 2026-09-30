@@ -150,6 +150,9 @@ Say "    root $Root"
 # One line per submodule that is not fully checked out, from git itself.
 function Get-SubmoduleProblems {
     $bad = @()
+    # No git is its own report ("git ... not on PATH"); asking it anything here
+    # would be a command-not-found from inside a diagnostic.
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return $bad }
     foreach ($line in (& git -C $Up submodule status --recursive 2>$null)) {
         if ($line -notmatch '^\s') { $bad += $line.Trim() }
     }
@@ -175,6 +178,48 @@ function Find-PreparedQt {
     $found = Get-ChildItem -Path (Join-Path $LibrariesRoot 'Qt-*') -Directory -ErrorAction SilentlyContinue |
         Where-Object { Test-Path (Join-Path $_.FullName 'lib\cmake\Qt6\Qt6Config.cmake') }
     if ($found) { return $found[0].FullName }
+    return $null
+}
+
+# Is this a working Python 3? Asked of the interpreter rather than inferred from
+# its name: a `python` that is Python 2 is worse than no python, because it runs
+# and then fails inside a script.
+#
+# The failure contained here is real and was found on the first Windows run:
+# `python` can be the Microsoft Store alias in
+# %LOCALAPPDATA%\Microsoft\WindowsApps -- a shim that prints an advertisement to
+# stderr and exits non-zero. `& $exe @probe 2>$null` under
+# $ErrorActionPreference = 'Stop' turned that into a TERMINATING error whose
+# message was the shim's text, so the script died while merely looking for a
+# tool it did not have. Native commands are therefore run with the preference
+# relaxed and their streams merged, and every failure means "no", nothing else.
+function Test-Python3 {
+    param([string[]]$Command)
+    if ($Command.Count -eq 0) { return $false }
+    $exe = $Command[0]
+    if (-not (Get-Command $exe -ErrorAction SilentlyContinue)) { return $false }
+    $probe = @()
+    if ($Command.Count -gt 1) { $probe += $Command[1..($Command.Count - 1)] }
+    $probe += @('-c', 'import sys; sys.exit(0 if sys.version_info[0]==3 else 1)')
+    $saved = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $ok = $false
+    try {
+        & $exe @probe 2>&1 | Out-Null
+        $ok = ($LASTEXITCODE -eq 0)
+    } catch {
+        $ok = $false
+    } finally {
+        $ErrorActionPreference = $saved
+    }
+    return $ok
+}
+
+# The first of python3 / python / py -3 that is a working Python 3, or nothing.
+function Get-PythonCommand {
+    foreach ($candidate in @(@('python3'), @('python'), @('py', '-3'))) {
+        if (Test-Python3 $candidate) { return ($candidate -join ' ') }
+    }
     return $null
 }
 
@@ -219,10 +264,50 @@ function Invoke-Doctor {
 
     Report 'architecture' "$Arch ($ArchOrigin) - libraries under $(Get-PreparedQtRoot)"
     Report 'spellings' "configure.bat $(Get-ConfigureArch), msbuild $(Get-MsbuildPlatform)"
+
+    # Which processor this actually is. It decides which prompt to open, and with
+    # -Arch auto the two are meant to match; when they do not, that is the whole
+    # reason to say so here.
+    $cpu = $env:PROCESSOR_ARCHITECTURE
+    if (-not $cpu) {
+        # Not set under PowerShell on other systems; the fallback keeps this from
+        # being a blank line in a report.
+        try { $cpu = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString() } catch { $cpu = 'unknown' }
+    }
+    if ($env:PROCESSOR_ARCHITEW6432) { $cpu = "$cpu (32-bit shell on $env:PROCESSOR_ARCHITEW6432)" }
+    Report 'processor' $cpu
+    if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -and $Arch -ne 'arm64') {
+        Say  '                    ARM64 machine, and this build is for another architecture:'
+        Say  '                    open the ARM64 prompt (vcvarsall.bat arm64) and -Arch auto'
+        Say  '                    will pick arm64, which is native here.'
+    }
+
     try {
         $drive = Get-Item $Root
-        $freeGb = [math]::Round((Get-PSDrive $drive.PSDrive.Name).Free / 1GB)
-        Report 'disk free' "${freeGb}GB on $($drive.PSDrive.Name):"
+        $driveName = $drive.PSDrive.Name
+        $freeGb = [math]::Round((Get-PSDrive $driveName).Free / 1GB)
+        Report 'disk free' "${freeGb}GB on $($driveName):"
+        # A mapped drive is usually a VM's shared folder (\\Mac\Home,
+        # \\vmware-host) or a network share, and two things go wrong there without
+        # saying why: git over a share is slow and locks files, and the build wants
+        # hardlinks and symlinks that SMB does not have -- Qt's syncqt and the
+        # library stages both use them.
+        $driveType = 'unknown'
+        # Only a drive letter names a DriveInfo; this script is also run on other
+        # systems in tests, where the name is a path.
+        if ($driveName -match '^[A-Za-z]$') {
+            try {
+                $driveType = ([System.IO.DriveInfo]::new("$($driveName):")).DriveType.ToString().ToLower()
+            } catch { }
+        }
+        Report 'drive' "$($driveName): - $driveType"
+        if ($driveType -eq 'network') {
+            Say  '                    a mapped or network drive (a VM shared folder reports the'
+            Say  '                    same). git and a multi-hour build are slow and fragile'
+            Say  '                    there, and hardlinks and symlinks that Qt and the library'
+            Say  '                    stages need do not work over SMB. A path inside the machine,'
+            Say  '                    C:\dev\ for example, avoids all of it.'
+        }
     } catch {
         Report 'disk free' 'unknown'
     }
@@ -238,30 +323,41 @@ function Invoke-Doctor {
         $blockers++
     }
 
-    foreach ($tool in 'git', 'bash') {
-        $cmd = Get-Command $tool -ErrorAction SilentlyContinue
-        if ($cmd) {
-            Report $tool "$($cmd.Source)"
-        } else {
-            Report $tool 'not on PATH' -Blocking
-            $blockers++
-        }
+    $cmd = Get-Command git -ErrorAction SilentlyContinue
+    if ($cmd) {
+        Report 'git' "$($cmd.Source)"
+    } else {
+        Report 'git' 'not on PATH - install Git for Windows' -Blocking
+        $blockers++
     }
 
-    $python = $null
-    foreach ($cand in @(@('python3'), @('python'), @('py', '-3'))) {
-        $exe = $cand[0]
-        if (-not (Get-Command $exe -ErrorAction SilentlyContinue)) { continue }
-        $probe = @()
-        if ($cand.Count -gt 1) { $probe += $cand[1..($cand.Count - 1)] }
-        $probe += @('-c', 'import sys; sys.exit(0 if sys.version_info[0]==3 else 1)')
-        & $exe @probe 2>$null
-        if ($LASTEXITCODE -eq 0) { $python = ($cand -join ' '); break }
+    # bash is needed for the bootstrap and overlay steps of the README -- which
+    # the reports above have already shown are done in this tree. prepare,
+    # configure and build do not use it: prepare drives cmd/bat and carries its
+    # own msys under ThirdParty. So this is reported, not required.
+    $cmd = Get-Command bash -ErrorAction SilentlyContinue
+    if ($cmd) {
+        Report 'bash' "$($cmd.Source)"
+    } else {
+        Report 'bash' 'not on PATH - only the bootstrap/overlay steps need it'
+        Say  '                    to run those: add C:\Program Files\Git\bin to PATH, or use'
+        Say  '                    the Git Bash shortcut'
     }
+
+    $python = Get-PythonCommand
     if ($python) {
         Report 'python 3' $python
     } else {
-        Report 'python 3' 'not found (tried python3, python, py -3)' -Blocking
+        Report 'python 3' 'not found - prepare and configure need it' -Blocking
+        if (Get-Command python -ErrorAction SilentlyContinue) {
+            Say  '                    a `python` exists but is not Python 3, which is usually the'
+            Say  '                    Microsoft Store alias: turn it off under Settings > Apps >'
+            Say  '                    Advanced app settings > App execution aliases, or install'
+            Say  '                    Python 3 from python.org and tick "Add to PATH".'
+        } else {
+            Say  '                    install Python 3 from python.org and tick "Add to PATH"'
+            Say  '                    (`python3` does not exist on Windows; `python` and `py -3` do).'
+        }
         $blockers++
     }
 
@@ -282,7 +378,9 @@ function Invoke-Doctor {
         Report 'macOS libraries' 'present in Libraries\ - a prepare here rebuilds them for Windows'
     }
 
-    if (Test-Path (Join-Path $Up '.git')) {
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        Report 'submodules' 'cannot check - git is not on PATH'
+    } elseif (Test-Path (Join-Path $Up '.git')) {
         $subs = Get-SubmoduleProblems
         if ($subs.Count -eq 0) {
             Report 'submodules' 'complete'
@@ -329,6 +427,10 @@ if (-not (Test-Path (Join-Path $Up 'Telegram\SourceFiles\freechat\freechat_built
 $introPath = Join-Path $Up 'Telegram\SourceFiles\intro\intro_server_select.cpp'
 if (-not (Select-String -Path $introPath -Pattern 'FreeChatBuiltin' -Quiet)) {
     Die "the auto-join hook is missing - run: bash scripts/apply-overlay.sh desktop"
+}
+
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    Die "git is not on PATH. Install Git for Windows (https://git-scm.com/download/win)."
 }
 
 # Submodule directories exist but are EMPTY until checked out, so test for a file
@@ -396,55 +498,40 @@ the Visual Studio environment is not initialised in this terminal.
 "@
 }
 
-if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-    Die "git is not on PATH. Install Git for Windows (https://git-scm.com/download/win)."
-}
-
-# Git Bash, not optional. bootstrap.sh and apply-overlay.sh are bash and there is
-# no PowerShell equivalent of them on purpose -- they are the same code on all
-# three systems, and a second implementation would be a second set of bugs. Git
-# for Windows ships the bash that runs them, and a Telegram Desktop Windows build
-# needs Git anyway. This check exists because the script's own error messages tell
-# you to run `bash scripts/...`, which is a confusing instruction to receive on a
-# machine with no bash.
+# Git Bash, needed for the bootstrap and overlay steps -- and only for them. This
+# used to be fatal, which is wrong twice over: the checks above have already
+# established that this tree is bootstrapped and overlaid (so those steps are
+# done), and prepare, configure and build never call bash at all: prepare drives
+# cmd/bat and carries its own msys under ThirdParty. A machine that can build was
+# being refused because it could not run a step it did not need.
 $bash = Get-Command bash -ErrorAction SilentlyContinue
 if (-not $bash) {
-    Die @"
-bash is not on PATH, and the preparation steps need it.
-
-  Install Git for Windows, then either
-    * run those steps from the "Git Bash" shortcut, or
-    * add C:\Program Files\Git\bin to PATH so `bash` works from here.
-
-  Do NOT use WSL for this: a WSL checkout cannot see your Visual Studio
-  installation, and the build needs MSVC on the Windows side.
-"@
+    Warn 'bash is not on PATH.'
+    Warn '  The bootstrap and overlay steps in the README run under it, so add it if you'
+    Warn '  still have to run them:'
+    Warn '    add C:\Program Files\Git\bin to PATH, or use the "Git Bash" shortcut.'
+    Warn '  Do NOT use WSL for that: a WSL checkout cannot see your Visual Studio'
+    Warn '  installation, and the build needs MSVC on the Windows side.'
+    Warn '  prepare, configure and build themselves do not need bash.'
 }
 
 # Python 3 under any of its Windows names. A python.org install provides
-# python.exe and the py.exe launcher and NOT python3, while the bash scripts call
-# Python 30 times -- they resolve the name themselves (scripts/lib/portable.sh),
-# and this check has to accept the same set or it rejects a machine that works.
-# The version is asked of the interpreter rather than assumed from its name: a
-# `python` that is Python 2 runs and then fails inside a script.
-$pythonOk = $false
-foreach ($cand in @(@('python3'), @('python'), @('py', '-3'))) {
-    $exe = $cand[0]
-    if (-not (Get-Command $exe -ErrorAction SilentlyContinue)) { continue }
-    $probeArgs = @()
-    if ($cand.Count -gt 1) { $probeArgs += $cand[1..($cand.Count - 1)] }
-    $probeArgs += @('-c', 'import sys; sys.exit(0 if sys.version_info[0]==3 else 1)')
-    & $exe @probeArgs 2>$null
-    if ($LASTEXITCODE -eq 0) { $pythonOk = $true; Log "python 3 found as: $($cand -join ' ')"; break }
-}
-if (-not $pythonOk) {
+# python.exe and the py.exe launcher and NOT python3, and this check has to accept
+# the same set the rest of the toolchain does or it rejects a machine that works.
+$python = Get-PythonCommand
+if (-not $python) {
     Die @"
 no working Python 3 found (tried python3, python, py -3).
 
   Install Python 3 from python.org and tick "Add python.exe to PATH" in the
   installer. Upstream's own build scripts expect Python 3.10 or newer on PATH.
+
+  If a `python` does exist but is not Python 3, it is usually the Microsoft Store
+  alias: turn it off under Settings > Apps > Advanced app settings > App
+  execution aliases.
 "@
 }
+Log "python 3: $python"
 
 # Branding, including the API credentials configure requires. gramsrv does not
 # validate either -- internal/rpc/auth.go:874 states there is no application
