@@ -20,12 +20,12 @@ the Visual Studio environment has been initialised with the OLD toolset. VS
     %comspec% /k "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=14.44
 
 Usage, from that terminal:
-    powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 [-Stage doctor|prepare|configure|build|all] [-Arch auto|x64|x86|arm64]
+    powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 [-Stage doctor|prepare|configure|build|all] [-Arch auto|x64|x86|arm64|both]
 #>
 param(
     [ValidateSet('doctor', 'prepare', 'configure', 'build', 'all')]
     [string]$Stage = 'configure',
-    [ValidateSet('auto', 'x64', 'x86', 'arm64')]
+    [ValidateSet('auto', 'x64', 'x86', 'arm64', 'both')]
     [string]$Arch = 'auto'
 )
 
@@ -81,19 +81,26 @@ trap {
 # The architecture, and the three tools that each spell it differently.
 #
 # Windows has no universal binary: no lipo, and ARM64X -- a single PE carrying
-# both an Arm64 and an x64 view -- runs on Windows on Arm only, so it does not
-# replace an x64 build either. A Windows build is one architecture, and upstream
-# supports three of them:
+# both an Arm64 and an x64 view -- runs on Windows on Arm ONLY (Microsoft's
+# "Arm64X PE files" documentation), so it does not replace an x64 build either. A
+# Windows build is one architecture, and upstream ships one installer per
+# architecture for the same reason (Telegram/build/setup.iss: tsetup-arm64.* with
+# ArchitecturesAllowed="arm64", tsetup-x64.* with "x64compatible").
+#
+# What "universal" can mean here is therefore two builds, and two artifacts:
 #
 #   -Arch   $env:Platform   configure.bat   msbuild   libraries
 #   x86     x86             x86             Win32     Libraries
 #   x64     x64             x64             x64       Libraries\win64
-#   arm64   arm64           arm             ARM64     Libraries
+#   arm64   arm64           arm           ARM64     Libraries
+#   both    (two passes: x64 then arm64)
 #
 # `auto`, the default, reads the environment, and that is not laziness: prepare.py
 # takes its architecture from exactly $env:Platform (set by the Visual Studio
-# prompt), so asking for x64 while the prompt is ARM64 builds the libraries for
-# one architecture and the app for the other, which fails while linking.
+# environment), so asking for x64 while the environment is ARM64 builds the
+# libraries for one architecture and the app for the other, which fails while
+# linking. When the environment does not match what was asked for, the script
+# initialises it -- see Start-VsEnvironment below.
 function Resolve-Arch {
     param([string]$Requested)
     if ($Requested -ne 'auto') {
@@ -111,6 +118,73 @@ function Resolve-Arch {
     }
     $script:ArchOrigin = 'the default - no architecture in the environment'
     return 'x64'
+}
+
+# What architecture the environment is set up for, if any. $env:Platform first,
+# because that is the variable prepare.py reads, so agreeing with it is the only
+# thing that matters.
+function Get-EnvironmentArch {
+    foreach ($candidate in @($env:Platform, $env:VSCMD_ARG_TGT_ARCH)) {
+        if (-not $candidate) { continue }
+        $value = $candidate.ToLower()
+        if ($value -eq 'amd64') { $value = 'x64' }
+        return $value
+    }
+    return ''
+}
+
+# Where Visual Studio is. vswhere is Microsoft's documented way to find it, and
+# the fallback is the install paths of the editions this project's docs name.
+#
+# The ProgramFiles roots are read one by one because a missing environment
+# variable is not an empty string for Join-Path -- it throws, and this runs in the
+# doctor, whose job is to report what is missing rather than to die on it.
+function Find-VsInstallPath {
+    $roots = @()
+    foreach ($name in @('ProgramFiles(x86)', 'ProgramFiles')) {
+        $value = [System.Environment]::GetEnvironmentVariable($name)
+        if ($value -and (Test-Path $value)) { $roots += $value }
+    }
+    foreach ($root in $roots) {
+        $vswhere = Join-Path $root 'Microsoft Visual Studio\Installer\vswhere.exe'
+        if (Test-Path $vswhere) {
+            $found = & $vswhere -latest -products * -property installationPath 2>$null | Select-Object -First 1
+            if ($found -and (Test-Path $found)) { return $found.Trim() }
+        }
+    }
+    foreach ($root in $roots) {
+        foreach ($candidate in @('18\Community', '18\Professional', '18\Enterprise', '2022\Community')) {
+            $path = Join-Path $root "Microsoft Visual Studio\$candidate"
+            if (Test-Path $path) { return $path }
+        }
+    }
+    return $null
+}
+
+# Where the per-architecture artifacts are kept. `out\` is shared between
+# architectures -- configure discards it when the stamp changes, and the stamp
+# changes when the architecture does -- so a second pass would delete the first
+# pass's EXE. One payload per architecture is also exactly what the installer
+# wants (Telegram/build/setup.iss takes one folder per build target).
+function Get-DistPath { return (Join-Path $Root 'desktop\dist') }
+
+function Copy-BuiltApp {
+    param([string]$WhichArch)
+    $release = Join-Path $Up 'out\Release'
+    $exe = $null
+    foreach ($name in @('FreeChat.exe', 'Telegram.exe')) {
+        $candidate = Join-Path $release $name
+        if (Test-Path $candidate) { $exe = $candidate; break }
+    }
+    if (-not $exe) {
+        Warn "the $WhichArch build left no EXE under $release - nothing to keep"
+        return
+    }
+    $dist = Get-DistPath
+    New-Item -ItemType Directory -Force -Path $dist | Out-Null
+    $target = Join-Path $dist ([System.IO.Path]::GetFileNameWithoutExtension($exe) + "-$WhichArch.exe")
+    Copy-Item -Force $exe $target
+    Log "kept the $WhichArch build: $target"
 }
 
 # What configure.bat wants: it takes the architecture as a bare argument, and its
@@ -296,9 +370,8 @@ function Invoke-Doctor {
     if ($env:PROCESSOR_ARCHITEW6432) { $cpu = "$cpu (32-bit shell on $env:PROCESSOR_ARCHITEW6432)" }
     Report 'processor' $cpu
     if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -and $Arch -ne 'arm64') {
-        Say  '                    ARM64 machine, and this build is for another architecture:'
-        Say  '                    open the ARM64 prompt (vcvarsall.bat arm64) and -Arch auto'
-        Say  '                    will pick arm64, which is native here.'
+        Say  '                    ARM64 machine; this build is for another architecture.'
+        Say  '                    For arm64: -Arch arm64. For both payloads: -Arch both.'
     }
 
     try {
@@ -332,13 +405,18 @@ function Invoke-Doctor {
     }
 
     # The one prerequisite that is not on PATH, and the reason prepare\win.bat
-    # and configure.bat fail without mentioning it.
+    # and configure.bat fail without mentioning it. NOT blocking when Visual Studio
+    # is installed: the script initialises the environment for the architecture
+    # itself (the Visual Studio section below), so a plain terminal is enough.
+    $vsPath = Find-VsInstallPath
     if ($env:VSINSTALLDIR) {
         Report 'visual studio' "initialised ($env:VSINSTALLDIR)"
+    } elseif ($vsPath) {
+        Report 'visual studio' "found at $vsPath"
+        Say  "                    the script initialises it for $Arch when a stage runs"
     } else {
-        Report 'visual studio' 'NOT initialised - prepare and configure cannot run' -Blocking
-        Say  "                    open a terminal with the OLD toolset first ($Arch):"
-        Say  "                      $VcvarsHint"
+        Report 'visual studio' 'NOT found - install "Desktop development with C++"' -Blocking
+        Say  '                    vswhere.exe and the usual install paths were both checked'
         $blockers++
     }
 
@@ -430,11 +508,107 @@ function Invoke-Doctor {
     Say '  nothing blocking. next: -Stage all'
 }
 
+# --- both architectures -----------------------------------------------------
+#
+# Two passes, each in its own process, because the Visual Studio environment is
+# per-architecture and a child cannot change its parent's. Each child initialises
+# its own environment, so this works from any terminal, and each child's artifact
+# is copied out before the next pass discards out\ (the configure stamp includes
+# the architecture). The result is the two payloads an installer needs.
+if ($RequestedArch -eq 'both') {
+    Log "both: x64 and arm64, one after the other ($Stage each)"
+    if (-not $env:VSINSTALLDIR) {
+        Say '    each pass initialises the Visual Studio environment for its own architecture'
+    }
+    $failed = @()
+    foreach ($one in @('x64', 'arm64')) {
+        Log "both: $one, stage $Stage"
+        # Contained: a child that cannot even start (no cmd, a policy blocking
+        # PowerShell) is a failed pass with a name, not the end of the run -- the
+        # point of this pass is to report on both architectures.
+        $code = 1
+        try {
+            & cmd /c "powershell -NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Stage $Stage -Arch $one"
+            $code = $LASTEXITCODE
+        } catch {
+            Say "    could not start the $one pass: $($_.Exception.Message)"
+        }
+        if ($code -ne 0) {
+            Warn "both: the $one pass failed (exit $code)"
+            $failed += $one
+        } elseif ($Stage -eq 'build' -or $Stage -eq 'all') {
+            Copy-BuiltApp $one
+        }
+    }
+    if ($failed.Count -gt 0) {
+        Die ("both: these passes failed: " + ($failed -join ', '))
+    }
+    if ($Stage -eq 'build' -or $Stage -eq 'all') {
+        Log "both: artifacts under $(Get-DistPath)"
+    }
+    exit 0
+}
+
 # Doctor runs before the checks that die, by design: its job is to report what is
 # missing, including the things the checks below treat as fatal.
 if ($Stage -eq 'doctor') {
     Invoke-Doctor
     exit 0
+}
+
+# --- the Visual Studio environment ------------------------------------------
+#
+# cl.exe, msbuild and the right toolset come from it, and it is PER ARCHITECTURE:
+# an x64 terminal cannot build arm64. Upstream's answer is to open the right
+# prompt by hand (building-win.md), which is one more thing to get wrong before a
+# build measured in hours -- and on Windows on Arm the ARM64 prompt is not the one
+# a shortcut gives you.
+#
+# So the environment is initialised here when it does not match the architecture
+# being built, and this script re-enters itself inside it: a child cmd.exe cannot
+# change its parent's environment, so the work has to happen in a process that
+# vcvarsall started. FREECHAT_VS_READY marks that second entry, so a vcvarsall
+# that fails to set what we expect cannot loop.
+$VsReadyVar = 'FREECHAT_VS_READY'
+$EnvArch = Get-EnvironmentArch
+if ($EnvArch -ne $Arch) {
+    if (Test-Path "env:$VsReadyVar") {
+        Warn "the Visual Studio environment still does not report $Arch (it says '$EnvArch')."
+        Warn '  Continuing, but prepare.py reads the same variable and may refuse.'
+    } else {
+        $vs = Find-VsInstallPath
+        if (-not $vs) {
+            Die @"
+Visual Studio was not found, and it is required to build.
+
+  Looked for vswhere.exe under ${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer,
+  and for Visual Studio 18/2022 under $env:ProgramFiles.
+  Install "Desktop development with C++" from the Visual Studio installer: that is
+  what provides cl.exe, msbuild and vcvarsall.bat.
+"@
+        }
+        $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvarsall.bat'
+        if (-not (Test-Path $vcvars)) {
+            Die "vcvarsall.bat is missing under $vs - the C++ workload is not installed."
+        }
+        Log "visual studio: initialising the $Arch environment"
+        Say "    $ `"$vcvars`" $Arch -vcvars_ver=14.44"
+        # Platform is set AFTER vcvarsall, so that prepare.py reads the value this
+        # environment actually is, whether or not vcvarsall sets it itself.
+        $inner = "powershell -NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Stage $Stage -Arch $Arch"
+        & cmd /c "`"$vcvars`" $Arch -vcvars_ver=14.44 && set Platform=$Arch && set $VsReadyVar=1 && $inner"
+        $code = $LASTEXITCODE
+        if ($code -ne 0) {
+            Warn "the Visual Studio environment could not be initialised for $Arch (exit $code)."
+            if ($Arch -eq 'arm64') {
+                Warn '  For arm64 the "MSVC ARM64 build tools" component must be installed;'
+                Warn '  it is not part of the default C++ workload.'
+            }
+            Warn '  Or open the right prompt by hand and run this again from there:'
+            Warn "    $VcvarsHint"
+        }
+        exit $code
+    }
 }
 
 # --- the phases that used to be silent --------------------------------------
@@ -470,9 +644,11 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
 # environment variable is the wrong order.
 if (-not $env:VSINSTALLDIR) {
     Die @"
-the Visual Studio environment is not initialised in this terminal.
+the Visual Studio environment is not initialised, and the script's own attempt to
+set it up did not take (see the messages above it).
 
-  Open a terminal with ($Arch; adjust the edition/path for your install):
+  Open a terminal with ($Arch; adjust the edition/path for your install) and run
+  this stage from there:
 
     $VcvarsHint
 

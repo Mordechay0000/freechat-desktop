@@ -240,10 +240,14 @@ but the range of supported deployment target versions is 12.0 to 27.0.99.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage doctor
-powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage prepare
-powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage configure
-powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage build
+powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage all                     # x64
+powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage all -Arch arm64         # ARM64
+powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage all -Arch both          # both payloads
 ```
+
+אין צורך לפתוח טרמינל מיוחד: הסקריפט מוצא את Visual Studio ומפעיל את הסביבה של
+הארכיטקטורה המבוקשת בעצמו (ראו למטה). `-Stage prepare`/`configure`/`build` בנפרד
+עובדים גם הם, וכך אפשר לעצור בין שלבים.
 
 `-Stage doctor` (כמו ב-macOS) מדפיס מה קיים ומה חסר ולא משנה דבר: PowerShell,
 סביבת Visual Studio, git/bash/Python 3, התקנת ה-Qt שהוכנה, שלמות ה-submodules
@@ -262,12 +266,49 @@ Arm64 וגם תצוגת x64 — רץ **רק** על Windows on Arm, כך שהוא
 | `x86` | `x86` | `x86` | `Win32` | `Libraries\` |
 | `x64` | `x64` | `x64` | `x64` | `Libraries\win64\` |
 | `arm64` | `arm64` | `arm` | `ARM64` | `Libraries\` |
+| `both` | שתי הרצות: x64 ואז arm64 | | | |
 
 ברירת המחדל, `-Arch auto`, קוראת את `$env:Platform` — בדיוק מה ש-prepare.py קורא
 — כך שסביבת Visual Studio קובעת את הארכיטקטורה של הספריות **ואת זו של האפליקציה**
 יחד. בקשה מפורשת של x64 כשה-prompt הוא ARM64 הייתה בונה את הספריות לארכיטקטורה
 אחת ואת האפליקציה לשנייה, וזה נכשל בקישור שעות אחר כך. לכן ה-`doctor` מדפיס איזו
 ארכיטקטורה נבחרה, מאיפה, ואיך היא נכתבת בכל אחד מהכלים.
+
+#### אין צורך לפתוח טרמינל מיוחד
+
+`build-desktop.ps1` מוצא את Visual Studio בעצמו (`vswhere.exe`, ואם אין — נתיבי
+ההתקנה הרגילים), מפעיל את הסביבה **של הארכיטקטורה המבוקשת** דרך
+`vcvarsall.bat <arch> -vcvars_ver=14.44`, ומריץ את עצמו מחדש בתוכה — כי `cmd` בן
+לא יכול לשנות את הסביבה של אביו (מכאן `FREECHAT_VS_READY`, שמונע לולאה כשההפעלה
+לא מצליחה). כלומר `-Stage prepare -Arch arm64` עובד מכל טרמינל, כולל cmd רגיל,
+ומכיוון שזו אותה משתנה (`Platform`) שגם `prepare.py` קורא, הספריות והאפליקציה לא
+יכולות להיבנות לארכיטקטורות שונות.
+
+אם ההפעלה נכשלת, `vcvarsall.bat` מדפיס למה, והסקריפט מזכיר את המלכודת של ARM64:
+חבילת **"MSVC ARM64 build tools"** אינה חלק מברירת המחדל של עומס C++ ב-Visual
+Studio, ובלעדיה `vcvarsall.bat arm64` נכשל.
+
+#### "קובץ universal" — מה כן אפשרי
+
+EXE אחד שירוץ גם על arm64 וגם על x64 **לא קיים**:
+
+- **ARM64X** — PE אחד שנושא תצוגת Arm64 ותצוגת Arm64EC — רץ **רק על Windows on
+  Arm** (זו התיעוד של Microsoft: `learn.microsoft.com/windows/arm/arm64x-pe`),
+  ואין ב-upstream שום נתיב ARM64EC/ARM64X בכל העץ.
+- **x86 (Win32)** כן רץ על שניהם — natively על x64, ובאמולציה על Arm — אבל זה
+  מסלול legacy עם תקרת זיכרון של 32 סיביות, ולא מה שאנחנו בונים.
+
+מה שכן אפשרי הוא **installer אחד שמכיל את שתי הבנייות**, וזו המשמעות הרגילה של
+"universal" ב-Windows. upstream שולח במקום זה שני installers —
+`Telegram/build/setup.iss` מכיל `MyBuildTarget == "winarm"` → `tsetup-arm64.*` עם
+`ArchitecturesAllowed="arm64"`, ו-`"win64"` → `tsetup-x64.*` — וזו גם הדרך שבה
+אפשר לבנות אחד משולב: Inno Setup יודע לשאת כמה ארכיטקטורות ב-installer אחד
+(`ArchitecturesAllowed="arm64 x64compatible"` ובחירת payload בזמן התקנה).
+
+הבנייה תומכת בזה: **`-Arch both`** מריץ את שני המעברים ברצף, ובסוף כל מעבר מעתיק
+את ה-EXE שלו ל-`desktop\dist\FreeChat-<arch>.exe` — כי `out\` משותף, וה-configure
+של המעבר השני היה מוחק את התוצר של הראשון. שני הקבצים האלה הם בדיוק ה-payload
+שאשכול התקנה צריך, אחד לכל ארכיטקטורה.
 
 **מכאן ש"universal" ב-Windows פירושו שתי בנייות** (x64 ו-arm64), כל אחת מה-prompt
 שלה ועם `-Stage prepare` משל עצמה — ואז שני קבצים, לא אחד. כדאי לדעת גם ש-x64 הוא

@@ -27,6 +27,14 @@ Windows). אין להם מקבילה ב-PowerShell במכוון: הם אותו �
 powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage doctor
 powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage all
 ```
+```powershell
+-Arch auto|x64|x86|arm64|both     # both = שני ה-payloads, אחד לכל ארכיטקטורה
+```
+
+אין צורך לפתוח טרמינל Visual Studio מיוחד — הסקריפט מפעיל את הסביבה של
+הארכיטקטורה המבוקשת בעצמו. ל-Windows **אין** EXE universal (ARM64X רץ רק על
+Windows on Arm): "universal" פירושו שני קבצים, או installer אחד שמכיל את שניהם —
+`-Arch both` מייצר את שניהם ל-`desktop\dist\`.
 
 לפני כן, ובכל שלב, אפשר לבדוק מה חסר בלי לשנות דבר:
 

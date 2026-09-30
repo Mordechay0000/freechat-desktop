@@ -29,6 +29,9 @@ api_credentials.local.*
 /desktop/upstream/
 # Third-party libraries built by prepare (desktop/Libraries, tens of GB).
 /desktop/Libraries/
+
+# Per-architecture artifacts kept by build-desktop.ps1 -Arch both
+/desktop/dist/
 /desktop/ThirdParty/
 
 # Split output — regenerate with scripts/split-repos.sh, never committed here.
