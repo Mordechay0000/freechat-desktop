@@ -24,6 +24,7 @@ Windows). אין להם מקבילה ב-PowerShell במכוון: הם אותו �
 ./scripts/build-desktop.sh all                # לינוקס (דרך Docker) או macOS
 ```
 ```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage doctor
 powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage all
 ```
 

@@ -198,10 +198,16 @@ but the range of supported deployment target versions is 12.0 to 27.0.99.
 ### Windows
 
 ```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage doctor
 powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage prepare
 powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage configure -Arch x64
 powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage build
 ```
+
+`-Stage doctor` (כמו ב-macOS) מדפיס מה קיים ומה חסר ולא משנה דבר: PowerShell,
+סביבת Visual Studio, git/bash/Python 3, התקנת ה-Qt שהוכנה, שלמות ה-submodules
+ומצב `out\`. הוא רץ **לפני** הבדיקות שנכשלות בכוונה, כי התפקיד שלו הוא לדווח על
+מה שחסר ולא למות עליו.
 
 **המכשלה שתופסת כל אחד:** הפקודות חייבות לרוץ בטרמינל שבו אותחלה סביבת
 Visual Studio **עם ה-toolset הישן**. ברירת המחדל של VS 2026 היא `v145` שלא
@@ -215,6 +221,55 @@ Visual Studio **עם ה-toolset הישן**. ברירת המחדל של VS 2026 �
 הסקריפט בודק `$env:VSINSTALLDIR` ומסרב אם הסביבה לא אותחלה, כי בלעדיה
 `prepare\win.bat` ו-`configure.bat` נכשלים בלי להזכיר את הסיבה.
 דורש גם Git ו-Python 3.10 ב-PATH.
+
+#### למה נראה כאילו הסקריפט לא עשה כלום
+
+`build-desktop.ps1` כותב ל-stdout ול-stderr ישירות, ולא דרך `Write-Host`. זו לא
+בחירת סגנון: `Write-Host` כותב אל ה-console host ולא אל ה-stdout של התהליך,
+ושני מצבים שגרתיים כאן מאבדים בדיוק את הפלט הזה:
+
+- **Git Bash (mintty)** — קונסולה מסוג pty, וכתיבה דרך ה-console host לא מגיעה
+  אליה. הסקריפט נכשל באחת הבדיקות המוקדמות, והחלון נשאר ריק — כלומר הפלט לא
+  "לא הודפס", הוא הודפס למקום שאין לו מסך.
+- **הפניית פלט** — ב-Windows PowerShell 5.1 (זה `powershell.exe` שבכל התקנת
+  Windows) `> log.txt` לוכד את stdout **ולא** את `Write-Host`: המסך הראה טקסט
+  והלוג יצא ריק. PowerShell 7 שינה זאת, וזו הסיבה שדווקא ב-pwsh זה נראה תקין.
+
+נוסף `trap` שמדפיס כל שגיאה שעולה ל-stderr, כי גם הרינדור של שגיאה ב-PowerShell
+הוא כתיבה ל-console host; בלעדיו קריסה שקטה באותה סביבה בדיוק. המחיר הוא צבעים,
+והוויתור מכוון: בנייה שאי אפשר לקרוא או לתעד גרועה מצבע.
+
+#### התקנת ה-Qt לפי ארכיטקטורה — מלכודת שנראית כמו "אין Qt"
+
+`prepare\win.bat` מתקין את ה-Qt הסטטי תחת `Libraries\win64\Qt-<version>` עבור
+x64, ותחת `Libraries\Qt-<version>` עבור x86 — ואותו דבר עושה cmake של upstream
+(`variables.cmake`: `build_win64` → `../Libraries/win64`). לכן עץ שהוכן ל-x86
+**בלתי נראה** ל-build של x64, והתוצאה זהה לחלוטין ל-"Neither Qt6 nor Qt5 is
+found". הסקריפט בודק את השורש של הארכיטקטורה המבוקשת, ואם הוא מוצא Qt בשורש
+השני הוא אומר זאת במפורש במקום לתת ל-cmake לנחש.
+
+### בנייה לשתי הפלטפורמות מאותה תיקייה
+
+אותו checkout יכול לשמש גם ל-macOS וגם ל-Windows. אין צורך להוריד שוב את
+ה-submodules ולא להחיל שוב את ה-overlay:
+
+| | מקום |
+|---|---|
+| המקורות וה-submodules | `desktop/upstream` — משותפים |
+| ספריות macOS | `desktop/Libraries/local`, וה-Qt ב-`local/Qt-6.11.1` |
+| ספריות Windows | `desktop/Libraries/win64` (x64), ה-Qt ב-`win64/Qt-6.11.1` |
+| פלט הבנייה | `desktop/upstream/out` — **משותף, ולכן לפלטפורמה אחת בכל רגע** |
+
+מה שכן צריך: `-Stage prepare` בצד Windows. זו בנייה **נפרדת** של Qt, FFmpeg,
+OpenSSL ו-‎30 ספריות נוספות מה-build של macOS (‎~35GB משלה, שעות) — היא לא נוגעת
+בספריות של macOS כלל. ומה שחוזר על עצמו: `out/`. ה-configure של Windows יזרוק
+את `out/` שנבנה ב-macOS ויבנה מחדש, ובחזרה; החותמת של כל פלטפורמה שונה (`...|mac|12.0`
+מול `...|x64`), כך שההחלפה קורית פעם אחת, בהצהרה מפורשת, ולא כמצב לא-עקבי. אם
+שתי הבנייות צריכות להתקיים במקביל — שני clones.
+
+`bootstrap.sh --with-submodules` ו-`apply-overlay.sh` **לא** צריך להריץ שוב:
+ה-submodules כבר בעץ והעטיפה כבר הוחלה. הם אידמפוטנטיים, כך שהרצה חוזרת לא
+מזיקה — אבל היא מאפסת את עץ המקורות, ולכן גם את הבנייה האינקרמנטלית שאחריה.
 
 ## הרצה — מה שתופגש בו בכל מערכת
 

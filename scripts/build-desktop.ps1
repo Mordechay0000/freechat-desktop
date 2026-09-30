@@ -20,10 +20,10 @@ the Visual Studio environment has been initialised with the OLD toolset. VS
     %comspec% /k "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=14.44
 
 Usage, from that terminal:
-    powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 [-Stage prepare|configure|build|all] [-Arch x64|x86]
+    powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 [-Stage doctor|prepare|configure|build|all] [-Arch x64|x86]
 #>
 param(
-    [ValidateSet('prepare', 'configure', 'build', 'all')]
+    [ValidateSet('doctor', 'prepare', 'configure', 'build', 'all')]
     [string]$Stage = 'configure',
     [ValidateSet('x64', 'x86')]
     [string]$Arch = 'x64'
@@ -34,9 +34,222 @@ $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $Up = Join-Path $Root 'desktop\upstream'
 
-function Log  { param($m) Write-Host "==> $m" -ForegroundColor Cyan }
-function Warn { param($m) Write-Host "!   $m" -ForegroundColor Yellow }
-function Die  { param($m) Write-Host "error: $m" -ForegroundColor Red; exit 1 }
+# Output goes to stdout and stderr, never to Write-Host.
+#
+# This is why the script looked like it printed nothing. Write-Host writes
+# through the console host instead of to the process's stdout, and two situations
+# that both happen here lose exactly that:
+#
+#   Git Bash (mintty)   the README tells people to run the bash steps from Git
+#                       Bash, and PowerShell started from there prints into
+#                       nothing: mintty is a pty, and console-host writes do not
+#                       reach it. The script would fail one of its checks and the
+#                       window would stay empty.
+#   any redirection     in Windows PowerShell 5.1 -- the powershell.exe on every
+#                       Windows install -- `> log.txt` captures stdout and NOT
+#                       Write-Host, so the screen showed text while the log came
+#                       out empty. PowerShell 7 changed this, which is why the
+#                       same script looks fine under pwsh.
+#
+# Colors are the price, and they are not worth a build that cannot be read or
+# logged. Errors go to stderr so a redirected run still puts the failure on the
+# screen.
+function Say  { param($m) [Console]::Out.WriteLine($m); [Console]::Out.Flush() }
+function Log  { param($m) Say "==> $m" }
+function Warn { param($m) Say "!   $m" }
+function Die  {
+    param($m)
+    [Console]::Error.WriteLine("error: $m")
+    [Console]::Error.Flush()
+    exit 1
+}
+
+# Anything that throws regardless -- a missing command, $ErrorActionPreference
+# doing its job -- is printed through the same channel, because PowerShell's own
+# rendering of an error is a console-host write too (see above). Without this, a
+# crash is silent in the very environment that needs the message most.
+trap {
+    [Console]::Error.WriteLine('error: ' + $_.Exception.Message)
+    try { [Console]::Error.WriteLine('  ' + $_.InvocationInfo.PositionMessage) } catch { }
+    exit 1
+}
+
+# Printed before any check runs, so that "the script did nothing" can never mean
+# "the script said nothing": the first line is on screen whatever happens next.
+Log "FreeChat desktop - windows, $Arch, stage $Stage"
+Say "    root $Root"
+
+# --- helpers the checks and the doctor both need ---------------------------
+#
+# Defined before the checks below, because -Stage doctor runs before them: its
+# whole point is to report a missing prerequisite instead of dying on it, so it
+# cannot be behind the checks that die.
+
+# One line per submodule that is not fully checked out, from git itself.
+function Get-SubmoduleProblems {
+    $bad = @()
+    foreach ($line in (& git -C $Up submodule status --recursive 2>$null)) {
+        if ($line -notmatch '^\s') { $bad += $line.Trim() }
+    }
+    return $bad
+}
+
+# Where prepare\win.bat installs Qt for this architecture.
+#
+# The architecture is part of the path because upstream's cmake reads only the
+# root for the architecture being built (variables.cmake: build_win64 ->
+# ../Libraries/win64) and prepare.py installs into the same one. A tree prepared
+# for x86 is therefore invisible to an x64 build in a way that looks exactly like
+# "no Qt at all", and saying so is the difference between a five-minute fix and
+# an afternoon.
+function Get-PreparedQtRoot {
+    if ($Arch -eq 'x86') { return (Join-Path $Root 'desktop\Libraries') }
+    return (Join-Path $Root 'desktop\Libraries\win64')
+}
+
+# The Qt install under a libraries root, found by what the build needs -- a Qt6
+# cmake config -- and not by the version in the directory name, which follows
+# upstream's qt_version.py.
+function Find-PreparedQt {
+    param([string]$LibrariesRoot)
+    $found = Get-ChildItem -Path (Join-Path $LibrariesRoot 'Qt-*') -Directory -ErrorAction SilentlyContinue |
+        Where-Object { Test-Path (Join-Path $_.FullName 'lib\cmake\Qt6\Qt6Config.cmake') }
+    if ($found) { return $found[0].FullName }
+    return $null
+}
+
+# One line of the doctor's report. The marker is a column of its own so that the
+# values line up whether or not a line is a problem -- an unaligned report is one
+# nobody scans, and this output is the whole point of the stage.
+function Report {
+    param([string]$Label, [string]$Value, [switch]$Blocking)
+    $mark = ' '
+    if ($Blocking) { $mark = '!' }
+    Say ("  {0}{1,-15} {2}" -f $mark, $Label, $Value)
+}
+
+# Everything the stages check, in one place, changing nothing.
+#
+# The bash side has the same stage, and the reason is the same on both: the two
+# ways this script failed both looked like nothing at all -- output that never
+# reached the console, and a check that died with a message nobody could see.
+# Read-only on purpose, and it exits 1 when something must be dealt with first,
+# so `-Stage doctor` followed by `-Stage all` means something.
+function Invoke-Doctor {
+    $blockers = 0
+    Say 'FreeChat desktop - preparation and toolchain'
+    Say ''
+    Report 'host' "windows $([System.Environment]::OSVersion.Version)"
+    Report 'powershell' "$($PSVersionTable.PSVersion)"
+
+    # The tree itself. Checked here rather than assumed, because doctor also has
+    # to work on a machine where the first thing to run is the diagnostic.
+    if (Test-Path (Join-Path $Up 'Telegram\SourceFiles')) {
+        Report 'upstream' 'present'
+    } else {
+        Report 'upstream' 'missing - bash scripts/bootstrap.sh desktop' -Blocking
+        $blockers++
+    }
+    if (Test-Path (Join-Path $Up 'Telegram\SourceFiles\freechat\freechat_builtin.h')) {
+        Report 'overlay' 'applied'
+    } else {
+        Report 'overlay' 'not applied - bash scripts/apply-overlay.sh desktop' -Blocking
+        $blockers++
+    }
+
+    Report 'architecture' "$Arch - libraries under $(Get-PreparedQtRoot)"
+    try {
+        $drive = Get-Item $Root
+        $freeGb = [math]::Round((Get-PSDrive $drive.PSDrive.Name).Free / 1GB)
+        Report 'disk free' "${freeGb}GB on $($drive.PSDrive.Name):"
+    } catch {
+        Report 'disk free' 'unknown'
+    }
+
+    # The one prerequisite that is not on PATH, and the reason prepare\win.bat
+    # and configure.bat fail without mentioning it.
+    if ($env:VSINSTALLDIR) {
+        Report 'visual studio' "initialised ($env:VSINSTALLDIR)"
+    } else {
+        Report 'visual studio' 'NOT initialised - prepare and configure cannot run' -Blocking
+        Say  '                    open a terminal with the OLD toolset first:'
+        Say  '                      %comspec% /k "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=14.44'
+        $blockers++
+    }
+
+    foreach ($tool in 'git', 'bash') {
+        $cmd = Get-Command $tool -ErrorAction SilentlyContinue
+        if ($cmd) {
+            Report $tool "$($cmd.Source)"
+        } else {
+            Report $tool 'not on PATH' -Blocking
+            $blockers++
+        }
+    }
+
+    $python = $null
+    foreach ($cand in @(@('python3'), @('python'), @('py', '-3'))) {
+        $exe = $cand[0]
+        if (-not (Get-Command $exe -ErrorAction SilentlyContinue)) { continue }
+        $probe = @()
+        if ($cand.Count -gt 1) { $probe += $cand[1..($cand.Count - 1)] }
+        $probe += @('-c', 'import sys; sys.exit(0 if sys.version_info[0]==3 else 1)')
+        & $exe @probe 2>$null
+        if ($LASTEXITCODE -eq 0) { $python = ($cand -join ' '); break }
+    }
+    if ($python) {
+        Report 'python 3' $python
+    } else {
+        Report 'python 3' 'not found (tried python3, python, py -3)' -Blocking
+        $blockers++
+    }
+
+    # Prepared state, read-only: doctor reports, it does not repair.
+    $qt = Find-PreparedQt (Get-PreparedQtRoot)
+    if ($qt) {
+        Report 'prepared Qt' $qt
+    } else {
+        Report 'prepared Qt' 'missing or half-written - -Stage prepare (~35GB, hours)' -Blocking
+        $blockers++
+    }
+
+    if (Test-Path (Join-Path $Up '.git')) {
+        $subs = Get-SubmoduleProblems
+        if ($subs.Count -eq 0) {
+            Report 'submodules' 'complete'
+        } else {
+            Report 'submodules' "$($subs.Count) problem(s):" -Blocking
+            foreach ($s in $subs) { Say "                    $s" }
+            $blockers++
+        }
+    } else {
+        Report 'submodules' 'cannot check - no upstream checkout'
+    }
+
+    if (Test-Path (Join-Path $Up 'out\Telegram.slnx')) {
+        Report 'build output' 'configured (out\Telegram.slnx)'
+    } else {
+        Report 'build output' 'not configured - -Stage configure'
+    }
+    $stamp = Join-Path $Up 'out\.freechat-configure-stamp'
+    if (Test-Path $stamp) {
+        Report 'stamp' "$(Get-Content $stamp -ErrorAction SilentlyContinue)"
+    }
+
+    Say ''
+    if ($blockers -gt 0) {
+        Say "  $blockers problem(s) above must be dealt with before a build."
+        exit 1
+    }
+    Say '  nothing blocking. next: -Stage all'
+}
+
+# Doctor runs before the checks that die, by design: its job is to report what is
+# missing, including the things the checks below treat as fatal.
+if ($Stage -eq 'doctor') {
+    Invoke-Doctor
+    exit 0
+}
 
 if (-not (Test-Path (Join-Path $Up 'Telegram\SourceFiles'))) {
     Die "desktop upstream missing - run: bash scripts/bootstrap.sh desktop"
@@ -72,10 +285,7 @@ submodules are not checked out, and the build needs them:
 # is present. Same rule as the bash side: bootstrap.sh, build-desktop.sh and this
 # script all ask git rather than trusting an existing directory.
 function Assert-Submodules {
-    $bad = @()
-    foreach ($line in (& git -C $Up submodule status --recursive 2>$null)) {
-        if ($line -notmatch '^\s') { $bad += $line.Trim() }
-    }
+    $bad = Get-SubmoduleProblems
     if ($bad.Count -eq 0) { return }
     Warn 'submodules are incomplete:'
     foreach ($b in $bad) { Warn "  $b" }
@@ -87,10 +297,7 @@ git submodule update failed. A dropped network is the usual cause.
       Run this script again: git resumes and skips the submodules it already has.
 "@
     }
-    $left = @()
-    foreach ($line in (& git -C $Up submodule status --recursive 2>$null)) {
-        if ($line -notmatch '^\s') { $left += $line.Trim() }
-    }
+    $left = Get-SubmoduleProblems
     if ($left.Count -gt 0) {
         $joined = $left -join "`n"
         Die @"
@@ -212,28 +419,44 @@ $apiHash = $brand['FREECHAT_API_HASH']
 #
 # cmake says that when find_package cannot see Qt, and it names the symptom
 # rather than the cause: Telegram Desktop links a STATIC Qt that prepare\win.bat
-# installs under Libraries\Qt-<version>, so the message means that install is
-# absent or half-written. Absent is the common case -- prepare's Qt stage starts
-# by deleting the directory it installs into, so a run interrupted by a full disk
-# or a dropped network leaves no Qt at all, and the stage's cache key (written
-# only on success) is never written. Identified by what the build needs, a Qt6
-# cmake config, not by the version in the directory name.
+# installs under Libraries\win64\Qt-<version> (x64 and arm64) or
+# Libraries\Qt-<version> (x86), so the message means that install is absent or
+# half-written. Absent is the common case -- prepare's Qt stage starts by
+# deleting the directory it installs into, so a run interrupted by a full disk or
+# a dropped network leaves no Qt at all, and the stage's cache key (written only
+# on success) is never written. Identified by what the build needs, a Qt6 cmake
+# config, not by the version in the directory name.
+#
+# The architecture is part of the check, because upstream's cmake reads only the
+# root for the architecture being built and prepare.py installs into the same one.
 function Assert-PreparedQt {
-    $libs = Join-Path $Root 'desktop\Libraries'
-    $found = Get-ChildItem -Path (Join-Path $libs 'Qt-*') -Directory -ErrorAction SilentlyContinue |
-        Where-Object { Test-Path (Join-Path $_.FullName 'lib\cmake\Qt6\Qt6Config.cmake') }
-    if ($found) {
-        Log "prepared Qt: $($found[0].FullName)"
+    $qt = Find-PreparedQt (Get-PreparedQtRoot)
+    if ($qt) {
+        Log "prepared Qt: $qt"
         return
+    }
+    $otherRoot = Join-Path $Root 'desktop\Libraries'
+    if ($Arch -eq 'x86') { $otherRoot = Join-Path $Root 'desktop\Libraries\win64' }
+    $elsewhere = Find-PreparedQt $otherRoot
+    if ($elsewhere) {
+        Die @"
+Qt is prepared, but for a different architecture:
+      found     $elsewhere
+      wanted    $(Get-PreparedQtRoot)
+      cmake reads only the root for the architecture being built, so this looks
+      exactly like "Neither Qt6 nor Qt5 is found". Prepare for this one:
+        powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage prepare -Arch $Arch
+"@
     }
     Die @"
 the static Qt the app links against is not installed.
       cmake reports this as "Neither Qt6 nor Qt5 is found".
-      prepare\win.bat installs Qt under desktop\Libraries\Qt-<version>, and that
-      directory is missing or half-written -- usually because prepare was
+      prepare\win.bat installs Qt under $(Get-PreparedQtRoot)\Qt-<version>, and
+      that directory is missing or half-written -- usually because prepare was
       interrupted. Run:
-        bash scripts\bootstrap.sh desktop --with-submodules
-        powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage prepare
+        powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage prepare -Arch $Arch
+      (~35GB free, hours; it is a separate build of Qt, FFmpeg and OpenSSL from
+      the ones a macOS build made in the same tree.)
 "@
 }
 
@@ -293,6 +516,8 @@ function Invoke-Build {
     }
 }
 
+# 'doctor' is not here: it runs and exits above the checks, before they can stop
+# it, which is the whole point of a stage that reports what is missing.
 switch ($Stage) {
     'prepare'   { Invoke-Prepare }
     'configure' { Invoke-Configure }
