@@ -55,11 +55,15 @@ $Up = Join-Path $Root 'desktop\upstream'
 # logged. Errors go to stderr so a redirected run still puts the failure on the
 # screen.
 function Say  { param($m) [Console]::Out.WriteLine($m); [Console]::Out.Flush() }
-function Log  { param($m) Say "==> $m" }
-function Warn { param($m) Say "!   $m" }
+
+# Every step line carries the time. prepare runs for hours and a build for longer,
+# and "which step was it in when it stopped" is the first question asked of a log
+# somebody was not watching. Warnings carry it too, for the same reason.
+function Log  { param($m) Say ("==> [$((Get-Date).ToString('HH:mm:ss'))] $m") }
+function Warn { param($m) Say ("!   [$((Get-Date).ToString('HH:mm:ss'))] $m") }
 function Die  {
     param($m)
-    [Console]::Error.WriteLine("error: $m")
+    [Console]::Error.WriteLine("error: [$((Get-Date).ToString('HH:mm:ss'))] $m")
     [Console]::Error.Flush()
     exit 1
 }
@@ -135,6 +139,14 @@ $VcvarsArch = ''
 if ($Arch -eq 'x86') { $VcvarsScript = 'vcvars32.bat' }
 if ($Arch -eq 'arm64') { $VcvarsScript = 'vcvarsall.bat'; $VcvarsArch = 'arm64 ' }
 $VcvarsHint = "%comspec% /k `"C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\$VcvarsScript`" $VcvarsArch-vcvars_ver=14.44"
+
+# Python block-buffers its stdout whenever it is not a terminal, and every child
+# process here is one. prepare.py narrates what it is about to do -- the stage it
+# is on, and the commands it is about to run -- and buffered, all of that arrives
+# in a lump AFTER the half hour it describes. Unbuffered, it arrives where it
+# happened, which is the difference between a log that says what is going on and
+# one that says what went on.
+$env:PYTHONUNBUFFERED = '1'
 
 # Printed before any check runs, so that "the script did nothing" can never mean
 # "the script said nothing": the first line is on screen whatever happens next.
@@ -637,6 +649,9 @@ function Invoke-Prepare {
         Warn '  is untouched). Use a separate clone of this repository for both.'
     }
 
+    # The command, before it runs: a log is kept so that "which command, exactly"
+    # has an answer.
+    Say '    $ Telegram\build\prepare\win.bat'
     Push-Location $Up
     try { & cmd /c 'Telegram\build\prepare\win.bat'; if ($LASTEXITCODE -ne 0) { Die 'prepare\win.bat failed' } }
     finally { Pop-Location }
@@ -657,6 +672,10 @@ function Invoke-Configure {
     }
 
     Log "configuring for $Arch"
+    # The API hash is elided in the echoed line: it comes from freechat.env and is
+    # not a secret (gramsrv does not validate it), but a log gets pasted into bug
+    # reports and there is no reason to copy it there.
+    Say "    $ configure.bat $(Get-ConfigureArch) -D TDESKTOP_API_ID=$apiId -D TDESKTOP_API_HASH=<hash>"
     Push-Location (Join-Path $Up 'Telegram')
     try {
         # configure.bat takes the architecture as a bare first argument, in ITS
@@ -682,6 +701,7 @@ function Invoke-Build {
     $msbuild = Get-Command msbuild -ErrorAction SilentlyContinue
     if ($msbuild) {
         Log "building with msbuild (Release, $(Get-MsbuildPlatform))"
+        Say "    $ msbuild $sln /p:Configuration=Release /p:Platform=$(Get-MsbuildPlatform) /m"
         & msbuild $sln /p:Configuration=Release /p:Platform=$(Get-MsbuildPlatform) /m
         if ($LASTEXITCODE -ne 0) { Die 'msbuild failed' }
         Log "result under $Up\out\Release"

@@ -24,8 +24,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 HOOK="$ROOT/scripts/lib/hook.py"
 
-log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
-die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+# log, warn and die come from lib/portable.sh: every progress line carries the
+# time, and a failure says when it happened.
 
 # The components this repository holds. A split repository holds one.
 TARGETS="desktop"

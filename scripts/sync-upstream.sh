@@ -44,8 +44,8 @@ TARGET="${2:-}"
 PIN="$ROOT/$WHICH/upstream.pin"
 DEST="$ROOT/$WHICH/upstream"
 
-log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
-die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+# log, warn and die come from lib/portable.sh, so every script's progress lines
+# carry the time and look the same.
 
 # shellcheck disable=SC1090
 load_env_file "$PIN" || die "cannot read $PIN"

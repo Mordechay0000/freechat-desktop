@@ -34,9 +34,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 UP="$ROOT/desktop/upstream"
 STAGE="${1:-build}"   # doctor | prepare | configure | build | all
 
-log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
-warn() { printf '\033[1;33m!\033[0m %s\n' "$*"; }
-die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+# log, warn and die come from lib/portable.sh: every progress line carries the
+# time, which is what makes a half-hour stage readable afterwards.
 
 case "$(uname -s)" in
   Linux)  OS=linux ;;
@@ -261,13 +260,16 @@ check_toolchain_stamp() {
 }
 
 do_prepare() {
-  log "$OS: preparing third-party libraries (hours, tens of GB)"
   case "$OS" in
     linux)
       command -v docker >/dev/null || die "docker is required for the Linux build. See docs/building-linux.md"
       command -v poetry >/dev/null || warn "upstream's linux.sh expects poetry (https://python-poetry.org)"
       check_submodules repair
-      "$UP/Telegram/build/prepare/linux.sh"
+      # PYTHONUNBUFFERED: prepare.py block-buffers its narration when stdout is
+      # not a terminal, so the list of stages and the commands they run would all
+      # appear after the half hour they describe. See lib/portable.sh.
+      PYTHONUNBUFFERED=1 step "linux: preparing the third-party libraries (hours, tens of GB)" \
+        "$UP/Telegram/build/prepare/linux.sh"
       write_toolchain_stamp
       ;;
     mac)
@@ -297,7 +299,8 @@ do_prepare() {
         log "stdin is not a terminal — running prepare.py with 'silent' (no prompts)"
         prep_args=(silent)
       fi
-      "$UP/Telegram/build/prepare/mac.sh" ${prep_args[@]+"${prep_args[@]}"}
+      PYTHONUNBUFFERED=1 step "mac: preparing the third-party libraries (hours, tens of GB)" \
+        "$UP/Telegram/build/prepare/mac.sh" ${prep_args[@]+"${prep_args[@]}"}
       write_toolchain_stamp
       ;;
   esac
@@ -320,14 +323,19 @@ do_configure() {
     rm -rf "$UP/out"
   fi
 
-  log "$OS: configuring"
   # Upstream's cmake sets 10.13 as a CACHE entry, which a -D on the command line
   # overrides without touching the submodule.
   local mac_args=()
   if [[ "$OS" == mac ]]; then
     mac_args=(-D CMAKE_OSX_DEPLOYMENT_TARGET="$mac_target")
   fi
-  ( cd "$UP/Telegram" && ./configure.sh \
+  # The command is printed so a log says what ran, with the API hash elided: it is
+  # a value from freechat.env rather than a secret (gramsrv does not validate it),
+  # but a log is pasted into bug reports and there is no reason to copy it there.
+  log "$OS: configuring"
+  printf '    $ ./configure.sh -D TDESKTOP_API_ID=%s -D TDESKTOP_API_HASH=<hash>%s\n' \
+    "$API_ID" "${mac_args[*]-}"
+  ( cd "$UP/Telegram" && PYTHONUNBUFFERED=1 ./configure.sh \
       -D TDESKTOP_API_ID="$API_ID" \
       -D TDESKTOP_API_HASH="$API_HASH" \
       ${mac_args[@]+"${mac_args[@]}"} )
@@ -342,10 +350,10 @@ do_build() {
     linux)
       # Upstream builds Linux inside its own container; the host toolchain is
       # not what it targets.
-      log "linux: building in the tdesktop:centos_env container"
       docker image inspect tdesktop:centos_env >/dev/null 2>&1 \
         || die "the tdesktop:centos_env image is missing — run: $0 prepare"
-      docker run --rm -it \
+      step "linux: building in the tdesktop:centos_env container" \
+        docker run --rm -it \
         -u "$(id -u)" \
         -v "$UP:/usr/src/tdesktop" \
         tdesktop:centos_env \
@@ -357,10 +365,10 @@ do_build() {
     mac)
       [[ -d "$UP/out" ]] || die "not configured yet — run: $0 configure"
       require_disk 12 "the app build"
-      log "mac: building"
       # cmake --build drives whatever generator configure.sh chose, so this works
       # whether that was Xcode or ninja, and needs no Xcode GUI step.
-      cmake --build "$UP/out" --config Release --parallel "$(sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+      step "mac: building" \
+        cmake --build "$UP/out" --config Release --parallel "$(sysctl -n hw.ncpu 2>/dev/null || echo 4)"
       log "result under $UP/out — or open $UP/out/Telegram.xcodeproj in Xcode"
       ;;
   esac

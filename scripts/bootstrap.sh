@@ -25,8 +25,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=lib/load_env.sh
 . "$ROOT/scripts/lib/load_env.sh"
 
-log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
-die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+# log, warn and die come from lib/portable.sh, so that every script's progress
+# lines carry the time and look the same. Nothing to define here.
 
 # The components this repository holds. A split repository holds one.
 TARGETS="desktop"

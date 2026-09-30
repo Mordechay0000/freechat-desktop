@@ -144,12 +144,59 @@ py_run() {
     printf '           `python3` does not exist there; this handles `python` and `py -3`.\n' >&2
     exit 1
   fi
+  # PYTHONUNBUFFERED: Python block-buffers its stdout whenever it is not a
+  # terminal, which is every invocation here. The messages then arrive in one
+  # lump when the process exits -- the prepare stage's list of what it is about to
+  # build, and the commands it is about to run, all printed AFTER the half hour
+  # they describe. That is what "the output is swallowed" looks like from the
+  # outside: it is not missing, it is late.
+  #
   # Deliberately unquoted: $PY may be "py -3", which has to split into two words.
   # shellcheck disable=SC2086
-  $PY "$@"
+  PYTHONUNBUFFERED=1 $PY "$@"
 }
 
 resolve_python || true
+
+# --- progress output --------------------------------------------------------
+#
+# One definition for every script, for two reasons.
+#
+# The time: a prepare stage runs for half an hour and a build for longer, and
+# "which step was it in when it stopped" is the first question anyone asks of a
+# log they were not watching.
+#
+# And because the same three functions had been copied into four scripts and had
+# started to drift -- only build-desktop.sh had a warn -- so a script added later
+# would have invented a fifth format.
+#
+# Warnings go to stdout, errors to stderr, which is what the scripts already did:
+# a build log written with `> log.txt` keeps the warnings, and a failure is still
+# on the console even when stdout is redirected. The colours are ANSI escapes in
+# the text itself, as they have always been here: a terminal shows them, and a
+# redirected file keeps the bytes instead of losing the line.
+
+# stamp  --  HH:MM:SS, or a placeholder if date cannot say.
+stamp() {
+  date +%H:%M:%S 2>/dev/null || printf '%s' '--:--:--'
+}
+
+log()  { printf '\033[1;34m==> [%s]\033[0m %s\n' "$(stamp)" "$*"; }
+warn() { printf '\033[1;33m!\033[0m [%s] %s\n' "$(stamp)" "$*"; }
+die()  { printf '\033[1;31merror:\033[0m [%s] %s\n' "$(stamp)" "$*" >&2; exit 1; }
+
+# step <description> <command...>  --  say what is about to run, then run it.
+#
+# The long stages are given as one line naming the command, because "which
+# command, exactly" is the question a log is kept for, and because the alternative
+# -- discovering it afterwards in upstream's own output -- only works if that
+# output arrived in order (see PYTHONUNBUFFERED above).
+step() {
+  local description=$1; shift
+  log "$description"
+  printf '    $ %s\n' "$*"
+  "$@"
+}
 
 # --- macOS toolchain --------------------------------------------------------
 #
