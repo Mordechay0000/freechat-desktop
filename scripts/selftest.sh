@@ -327,6 +327,17 @@ if [[ -f "$ROOT/scripts/split-repos.sh" ]]; then
   fi
 fi
 
+# --- icons come from two master SVGs ---------------------------------------
+# The generated files are committed. A master edited without regenerating would
+# ship the previous mark, and the stamp is what notices.
+if [[ -f "$ROOT/scripts/lib/gen_icons.py" ]]; then
+  if py_run "$ROOT/scripts/lib/gen_icons.py" desktop "$ROOT" --check >/dev/null 2>&1; then
+    ok "the committed icons were generated from the current logo"
+  else
+    bad "desktop/branding/logo*.svg changed without regenerating: python3 scripts/lib/gen_icons.py desktop ."
+  fi
+fi
+
 # --- Windows: line endings and PowerShell encoding --------------------------
 # Git for Windows defaults to core.autocrlf=true. Without .gitattributes pinning
 # scripts to LF, a Windows clone gets CRLF and bash fails on line 1 of every
