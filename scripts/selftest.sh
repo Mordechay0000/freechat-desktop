@@ -67,6 +67,19 @@ else
   bad "paths that are the SAME path on macOS/Windows: $case_clash"
 fi
 
+# --- nothing generated is tracked -------------------------------------------
+# Python bytecode landed in two repositories because `git add -A` collected the
+# __pycache__ that py_compile wrote while a script was being syntax-checked. A
+# .pyc is not source, differs per interpreter version, and is noise in every
+# later diff. .gitignore alone is not enough -- it does not stop a file that is
+# already tracked -- so the tracked set is checked directly.
+litter="$(git -C "$ROOT" ls-files 2>/dev/null | grep -E '(^|/)__pycache__/|\.pyc$|\.DS_Store$|(^|/)Thumbs\.db$|\.log$|\.orig$|\.rej$' || true)"
+if [[ -z "$litter" ]]; then
+  ok "no generated or editor files are tracked"
+else
+  bad "tracked files that should not be:$(printf ' %s' $litter)"
+fi
+
 # --- every pin is a full SHA ------------------------------------------------
 # The desktop pin once read COMMIT=d5a262f. A shallow fetch by commit needs the
 # full id, so no fresh machine could bootstrap the desktop client at all -- and

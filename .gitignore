@@ -40,3 +40,7 @@ api_credentials.local.*
 # Local configuration, copied from freechat.env.example. Never committed:
 # a shared env may hold a Postgres password, and the example is the schema.
 /freechat.env
+
+# Python bytecode, written next to the scripts whenever one is imported or compiled.
+__pycache__/
+*.pyc
