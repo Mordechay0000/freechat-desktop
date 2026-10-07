@@ -327,6 +327,32 @@ if [[ -f "$ROOT/scripts/split-repos.sh" ]]; then
   fi
 fi
 
+# --- the official product name is rewritten in the strings the app ships ----
+# 184 (Android) / 262 (desktop) built-in strings said "Telegram", for example
+# "Subscribe to Telegram Premium" in an app whose Premium is not Telegram's.
+# Values change; resource KEYS must not (the code looks them up by name).
+if [[ -f "$ROOT/scripts/lib/purge_official_text.py" ]]; then
+  pot="$TMP/pot"; rm -rf "$pot"; mkdir -p "$pot"
+  mkdir -p "$pot/Telegram/Resources/langs"
+  printf '%s\n' '/* Telegram header comment */' '"lng_telegram_faq" = "Telegram FAQ, see https://telegram.org/faq or t.me/x";' \
+    '"lng_plain" = "Nothing here";' > "$pot/Telegram/Resources/langs/lang.strings"
+  pot_file="$pot/Telegram/Resources/langs/lang.strings"; pot_plat=desktop
+  if py_run "$ROOT/scripts/lib/purge_official_text.py" "$pot_plat" "$pot" Acme https://acme.test >/dev/null 2>&1; then
+    if grep -q 'Acme FAQ, see https://acme.test/faq or acme.test/x' "$pot_file" \
+       && grep -q -i 'name="TelegramFaq"\|"lng_telegram_faq"' "$pot_file"; then
+      ok "official name and hosts rewritten in values, resource keys kept"
+    else
+      bad "purge_official_text.py: wrong result: $(cat "$pot_file" | tr '\n' ' ')"
+    fi
+    cp "$pot_file" "$pot/first"
+    py_run "$ROOT/scripts/lib/purge_official_text.py" "$pot_plat" "$pot" Acme https://acme.test >/dev/null 2>&1
+    cmp -s "$pot/first" "$pot_file" && ok "a second run of purge_official_text.py changes nothing" \
+                                    || bad "purge_official_text.py is not idempotent"
+  else
+    bad "purge_official_text.py failed on a valid tree"
+  fi
+fi
+
 # --- icons come from two master SVGs ---------------------------------------
 # The generated files are committed. A master edited without regenerating would
 # ship the previous mark, and the stamp is what notices.

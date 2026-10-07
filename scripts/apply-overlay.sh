@@ -381,6 +381,13 @@ PY7
     "$([[ "${BRAND_INCLUDE_TELEGRAM:-false}" =~ ^(1|true|yes|on)$ ]] && echo false || echo true)" \
     || die "desktop branding purge failed — see the paths above"
 
+  # The strings the app ships: "Subscribe to Telegram Premium" in an app whose Premium is
+  # not Telegram's. Same rule as the server applies to the langpack it serves.
+  log "desktop: rewriting the official product name in the shipped strings"
+  py_run "$ROOT/scripts/lib/purge_official_text.py" desktop "$up" "$BRAND_NAME" \
+    "${FREECHAT_PUBLIC_URL:?FREECHAT_PUBLIC_URL missing from $FREECHAT_ENV_SOURCES}" \
+    || die "the official product name is still in the shipped strings -- see above"
+
   # Brand icons go in AFTER the purge, not with the rest of the overlay. The purge
   # renames Resources/<fork>/ to Resources/FreeChat/, so icons copied earlier landed
   # in a directory that the rename then merged into, and upstream's own files won:
