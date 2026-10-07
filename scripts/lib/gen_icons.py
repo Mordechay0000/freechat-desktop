@@ -491,7 +491,7 @@ def build_android(m, r, out, root):
     out.text(main_res + "raw/plane_logo_plain.json", _lottie(m))
 
 
-PLATFORMS["android"] = {"build": build_android, "overlay": "android/overlay", "branding": "android/branding",
+PLATFORMS["android"] = {"build": build_android, "overlay": "android/overlay-late", "branding": "android/branding",
                         "wants_root": True}
 
 
