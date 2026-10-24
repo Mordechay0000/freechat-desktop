@@ -239,6 +239,7 @@ but the range of supported deployment target versions is 12.0 to 27.0.99.
 ### Windows
 
 ```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage install                 # מתקין מה שחסר
 powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage doctor
 powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage all                     # x64
 powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage all -Arch arm64         # ARM64
@@ -248,6 +249,46 @@ powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage all -A
 אין צורך לפתוח טרמינל מיוחד: הסקריפט מוצא את Visual Studio ומפעיל את הסביבה של
 הארכיטקטורה המבוקשת בעצמו (ראו למטה). `-Stage prepare`/`configure`/`build` בנפרד
 עובדים גם הם, וכך אפשר לעצור בין שלבים.
+
+#### `-Stage install` — התקנת הדרישות
+
+מתקין **רק מה שחסר**, ואומר כל דבר לפני שהוא עושה אותו:
+
+| מה | איך | הערה |
+|---|---|---|
+| Git for Windows | `winget install Git.Git` | כולל את ה-bash להרצת `bootstrap`/`apply-overlay`; מגדיר גם `core.longpaths` |
+| Python 3 | `winget install Python.Python.3.12` | אפשר לשנות עם `FREECHAT_PYTHON_WINGET_ID`. הבנייה של upstream קוראת ל-`python` בשם הזה בדיוק, ואם רק `py -3` עובד (alias של Microsoft Store מסתיר את `python`) הסקריפט שם את המפרש האמיתי בראש ה-PATH של התהליך |
+| Visual Studio Build Tools | `https://aka.ms/vs/18/stable/vs_buildtools.exe` | אותו bootstrapper ואותם שמות רכיבים ש-CI של upstream משתמש בהם. רכיבים: עומס C++, toolset **14.44**, Windows 11 SDK **26100**, CMake, ATL — ועם `-Arch arm64`/`both` גם כלי ARM64. דורש UAC |
+
+אם יש כבר Visual Studio בלי toolset 14.44, ה-Build Tools מותקנים **לצידו** ולא
+נוגעים בו; הסקריפט בוחר את ההתקנה שיש בה 14.44. הדיסק (60GB+), ארכיטקטורה ו-PATH
+נבדקים אחרי ההתקנה על ידי אותו `doctor`.
+
+> **מה שהסקריפט לא עושה:** לא משנה הגדרות מערכת (למשל `LongPathsEnabled` ב-registry).
+> `doctor` מדווח עליהן; ובכל מקרה עדיף נתיב קצר (`C:\fc`) — העץ של Qt עמוק מ-260 תווים.
+
+#### מה אומת ומה לא
+
+אומת מול מקורות ה-upstream המוצמדים (לא על מכונת Windows):
+
+- **Qt 5.15 ב-x86/x64, Qt 6.11 רק ב-arm64** (`qt_version.py`). `doctor` ו-`configure`
+  חיפשו בעבר `Qt6Config.cmake` בלבד, כלומר **prepare תקין ב-x64 דווח כ"חסר"**
+  ו-configure סירב לרוץ. תוקן; הבדיקה ב-`scripts/selftest.sh`.
+- **`set Platform=x64 && ...` ב-cmd שומר "x64 " עם רווח**, ו-`prepare.py` משווה
+  `== 'x64'`. אתחול הסביבה עבר לקובץ batch זמני עם `set "Platform=x64"`.
+- **קובץ ה-solution**: VS 2026 כותב `Telegram.slnx` ו-VS 2022 `Telegram.sln`; הסקריפט
+  מחפש את שניהם, ובונה `/t:Telegram` (כמו "Build Telegram" בהוראות upstream).
+- **`prepare` רץ עם `silent`** (כמו ב-CI של upstream), אחרת stage שהמתכון שלו השתנה
+  מחכה ללחיצת מקש.
+- ה-SDK `10.0.26100.0` ו-`-vcvars_ver=14.44` מועברים ל-`vcvarsall`.
+- ה-overlay מוחל נקי על ה-pin האמיתי (`d5a262f`), ו-`FreeChat.exe` הוא שם הפלט אחרי
+  ה-purge (`output_name` ב-`Telegram/CMakeLists.txt`).
+- התחביר נבדק ב-PowerShell 7.5; ה-selftest מריץ גם את `Find-PreparedQt` על fixtures.
+
+**לא אומת:** ריצה מלאה של `prepare` (שעות, עשרות GB, הורדות מ-GitHub/MSYS2/Qt), של
+`configure` ושל `msbuild`; והשלב `install` עצמו (winget והתקנת VS). מזהי רכיבי ה-VS
+נלקחו מהתיעוד של Microsoft ומה-CI של upstream; אם `install` נכשל על מזהה — הלוג
+של ה-installer ב-`%TEMP%\dd_*.log` יגיד איזה.
 
 `-Stage doctor` (כמו ב-macOS) מדפיס מה קיים ומה חסר ולא משנה דבר: PowerShell,
 סביבת Visual Studio, git/bash/Python 3, התקנת ה-Qt שהוכנה, שלמות ה-submodules

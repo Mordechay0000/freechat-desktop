@@ -24,6 +24,7 @@ Windows). אין להם מקבילה ב-PowerShell במכוון: הם אותו �
 ./scripts/build-desktop.sh all                # לינוקס (דרך Docker) או macOS
 ```
 ```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage install   # מתקין Git, Python ו-VS Build Tools (14.44, SDK, CMake) אם חסרים
 powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage doctor
 powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage all
 ```
@@ -49,9 +50,11 @@ Windows on Arm): "universal" פירושו שני קבצים, או installer אח
 
 **הבנייה של macOS אומתה מקצה לקצה** (2026-09-30): `prepare` בנה Qt 6.11.1
 בכ-30 דקות, ו-`out/Release/FreeChat.app` נוצר — אוניברסלי x86_64+arm64, 1.6GB,
-חתום ad-hoc. **לינוקס ו-Windows עדיין לא הורצו** (אין docker ואין Visual Studio
-בסביבה שבה נכתב הריפו); שם ה-overlay אומת בקריאת קוד, וכשל ראשון הוא כנראה פער
-בשרשרת הכלים ולא overlay שבור.
+חתום ad-hoc. **לינוקס ו-Windows עדיין לא הורצו מקצה לקצה** (אין docker ואין Visual
+Studio בסביבה שבה נכתב הריפו). ב-Windows נבדקו מול מקורות ה-upstream המוצמדים:
+התחביר, החלת ה-overlay, בחירת Qt לפי ארכיטקטורה, קובץ ה-solution ואתחול סביבת VS —
+ונמצאו ותוקנו שני באגים שהיו עוצרים בנייה של x64 (פירוט ב-`docs/10-DESKTOP.md`).
+כשל ראשון הוא כנראה פער בשרשרת הכלים ולא overlay שבור.
 
 ## שתי אסימטריות מול אנדרואיד — שתיהן אומתו בקוד
 
