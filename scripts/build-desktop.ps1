@@ -5,25 +5,34 @@ A wrapper around upstream's own flow, not a replacement for it. The authority is
 desktop/upstream/docs/building-win.md; this script checks the prerequisites that
 are easy to get wrong and then calls upstream's scripts.
 
-NOT VERIFIED, in two senses. No Windows machine was involved in producing this
-repository, and prepare/win.bat compiles Qt, FFmpeg, OpenSSL and ~30 more
-libraries -- tens of GB and hours. Beyond that, the environment this was written
-in had no PowerShell at all, so even the SYNTAX of this file is unchecked. Read it
-before running it, and treat a first failure as a toolchain gap or a typo here
-rather than a broken overlay.
+NOT RUN END TO END. prepare/win.bat compiles Qt, FFmpeg, OpenSSL and ~30 more
+libraries -- tens of GB and hours -- and no Windows machine was available while
+this was written. What HAS been checked, against the pinned upstream sources
+(Telegram/build/prepare/prepare.py, qt_version.py, cmake_helpers' run_cmake.py and
+upstream's own .github/workflows/win.yml): the syntax under PowerShell 7, the
+overlay applying to the pin, and every upstream fact this script relies on (which
+Qt each architecture gets, where the libraries land, which solution file cmake
+writes, which VS components upstream's CI installs). Treat a first failure as a
+toolchain gap rather than a broken overlay.
 
 The one thing that catches everyone: these commands must run in a terminal where
 the Visual Studio environment has been initialised with the OLD toolset. VS
 2026's default v145 does not support Windows 7, so upstream requires
--vcvars_ver=14.44:
+-vcvars_ver=14.44. This script does that itself; by hand it is:
 
     %comspec% /k "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=14.44
 
-Usage, from that terminal:
-    powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 [-Stage doctor|prepare|configure|build|all] [-Arch auto|x64|x86|arm64|both]
+Usage:
+    powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 [-Stage install|doctor|prepare|configure|build|all] [-Arch auto|x64|x86|arm64|both]
+
+  -Stage install   installs what is missing through winget and Microsoft's own
+                   Build Tools bootstrapper: Git, Python 3, and Visual Studio
+                   Build Tools with the C++ workload, the 14.44 toolset, the
+                   Windows SDK and CMake (plus ARM64 tools for -Arch arm64|both).
+                   Nothing is reinstalled if it is already there.
 #>
 param(
-    [ValidateSet('doctor', 'prepare', 'configure', 'build', 'all')]
+    [ValidateSet('install', 'doctor', 'prepare', 'configure', 'build', 'all')]
     [string]$Stage = 'configure',
     [ValidateSet('auto', 'x64', 'x86', 'arm64', 'both')]
     [string]$Arch = 'auto'
@@ -145,18 +154,79 @@ function Find-VsInstallPath {
         $value = [System.Environment]::GetEnvironmentVariable($name)
         if ($value -and (Test-Path $value)) { $roots += $value }
     }
+    # Every installation that has the C++ x64/x86 tools, not just the newest: a
+    # machine with VS 2026 (no 14.44 toolset) next to VS 2022 (which has it) must
+    # resolve to the one that can actually build, and -latest would pick the other.
+    # Build Tools count -- they are what the install stage puts on a clean machine.
+    $all = @()
     foreach ($root in $roots) {
         $vswhere = Join-Path $root 'Microsoft Visual Studio\Installer\vswhere.exe'
         if (Test-Path $vswhere) {
-            $found = & $vswhere -latest -products * -property installationPath 2>$null | Select-Object -First 1
-            if ($found -and (Test-Path $found)) { return $found.Trim() }
+            $lines = & $vswhere -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null
+            foreach ($line in $lines) {
+                if ($line -and (Test-Path $line.Trim())) { $all += $line.Trim() }
+            }
         }
     }
-    foreach ($root in $roots) {
-        foreach ($candidate in @('18\Community', '18\Professional', '18\Enterprise', '2022\Community')) {
-            $path = Join-Path $root "Microsoft Visual Studio\$candidate"
-            if (Test-Path $path) { return $path }
+    if ($all.Count -eq 0) {
+        foreach ($root in $roots) {
+            foreach ($candidate in @('18\Community', '18\Professional', '18\Enterprise', '18\BuildTools',
+                                     '2022\Community', '2022\Professional', '2022\Enterprise', '2022\BuildTools')) {
+                $path = Join-Path $root "Microsoft Visual Studio\$candidate"
+                if (Test-Path $path) { $all += $path }
+            }
         }
+    }
+    foreach ($path in $all) {
+        if (Test-VsToolset144 $path) { return $path }
+    }
+    if ($all.Count -gt 0) { return $all[0] }
+    return $null
+}
+
+# Is the 14.44 toolset (v143 line, the last one that targets Windows 7) installed
+# in this Visual Studio? vcvarsall.bat -vcvars_ver=14.44 fails without it, and the
+# failure is a line in a wall of output.
+function Test-VsToolset144 {
+    param([string]$VsPath)
+    if (-not $VsPath) { return $false }
+    $found = Get-ChildItem -Path (Join-Path $VsPath 'VC\Tools\MSVC') -Directory -Filter '14.44*' -ErrorAction SilentlyContinue
+    return [bool]$found
+}
+
+# The Windows SDK upstream builds with (docs/building-win.md: "10.0.26100.0 SDK
+# version"; its CI passes the same number to the environment setup). Returns the
+# version when that SDK is installed, else nothing -- the caller then lets
+# vcvarsall take its default, which is the newest installed.
+function Find-WantedSdk {
+    $want = '10.0.26100.0'
+    foreach ($name in @('ProgramFiles(x86)', 'ProgramFiles')) {
+        $value = [System.Environment]::GetEnvironmentVariable($name)
+        if ($value -and (Test-Path (Join-Path $value "Windows Kits\10\Include\$want"))) { return $want }
+    }
+    return $null
+}
+
+# Does the Visual Studio at $VsPath have the MSVC ARM64 tools? Not in the default
+# C++ workload, and vcvarsall.bat arm64 fails without them.
+function Test-VsArm64Tools {
+    param([string]$VsPath)
+    if (-not $VsPath) { return $false }
+    foreach ($dir in @(Get-ChildItem -Path (Join-Path $VsPath 'VC\Tools\MSVC') -Directory -ErrorAction SilentlyContinue)) {
+        if (Test-Path (Join-Path $dir.FullName 'bin\Hostx64\arm64\cl.exe')) { return $true }
+        if (Test-Path (Join-Path $dir.FullName 'bin\Hostarm64\arm64\cl.exe')) { return $true }
+    }
+    return $false
+}
+
+# The solution cmake wrote. Visual Studio 2026 generates Telegram.slnx and Visual
+# Studio 2022 Telegram.sln (upstream's docs name .slnx, its older scripts .sln),
+# and which one it is depends on the VS that cmake picked -- so look for either
+# rather than naming one and calling a good configure "not configured yet".
+function Find-Solution {
+    foreach ($name in @('Telegram.slnx', 'Telegram.sln')) {
+        $candidate = Join-Path $Up "out\$name"
+        if (Test-Path $candidate) { return $candidate }
     }
     return $null
 }
@@ -263,14 +333,23 @@ function Get-PreparedQtRoot {
     return (Join-Path $Root 'desktop\Libraries')
 }
 
-# The Qt install under a libraries root, found by what the build needs -- a Qt6
+# The Qt install under a libraries root, found by what the build needs -- a Qt
 # cmake config -- and not by the version in the directory name, which follows
 # upstream's qt_version.py.
+#
+# Qt5 OR Qt6, and that is not tolerance for its own sake: qt_version.py gives x86
+# and x64 Qt 5.15.x and only arm64 (or an explicit `qt6` argument) Qt 6, so on
+# the default architecture a COMPLETE prepare leaves lib\cmake\Qt5\Qt5Config.cmake
+# and no Qt6 file at all. Looking only for Qt6 reported a finished x64 prepare as
+# "missing or half-written", and the configure stage refused to start.
 function Find-PreparedQt {
     param([string]$LibrariesRoot)
     $found = Get-ChildItem -Path (Join-Path $LibrariesRoot 'Qt-*') -Directory -ErrorAction SilentlyContinue |
-        Where-Object { Test-Path (Join-Path $_.FullName 'lib\cmake\Qt6\Qt6Config.cmake') }
-    if ($found) { return $found[0].FullName }
+        Where-Object {
+            (Test-Path (Join-Path $_.FullName 'lib\cmake\Qt5\Qt5Config.cmake')) -or
+            (Test-Path (Join-Path $_.FullName 'lib\cmake\Qt6\Qt6Config.cmake'))
+        }
+    if ($found) { return @($found)[0].FullName }
     return $null
 }
 
@@ -308,10 +387,28 @@ function Test-Python3 {
     return $ok
 }
 
-# The first of python3 / python / py -3 that is a working Python 3, or nothing.
+# A working Python 3 under the name `python`, or nothing.
+#
+# That exact name, because upstream's own Telegram\build\prepare\win.bat and
+# Telegram\configure.bat run `python <script>.py` and nothing else. A machine where
+# only `py -3` works (python.org installs the py launcher, and the Microsoft Store
+# alias shadows `python` in PATH) passed the old check and then failed inside
+# win.bat with the alias's advertisement. So when `python` itself is unusable but
+# the launcher finds a real interpreter, that interpreter's directory goes in front
+# of PATH for this process -- and so for every child, win.bat included.
 function Get-PythonCommand {
-    foreach ($candidate in @(@('python3'), @('python'), @('py', '-3'))) {
-        if (Test-Python3 $candidate) { return ($candidate -join ' ') }
+    if (Test-Python3 @('python')) { return 'python' }
+    if (Test-Python3 @('py', '-3')) {
+        $saved = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $exe = $null
+        try { $exe = & py -3 -c 'import sys; print(sys.executable)' 2>$null | Select-Object -First 1 } catch { }
+        $ErrorActionPreference = $saved
+        if ($exe -and (Test-Path $exe)) {
+            $dir = Split-Path -Parent $exe
+            $env:Path = "$dir;$dir\Scripts;$env:Path"
+            if (Test-Python3 @('python')) { return "python (via py -3: $exe)" }
+        }
     }
     return $null
 }
@@ -334,6 +431,7 @@ function Report {
 # Read-only on purpose, and it exits 1 when something must be dealt with first,
 # so `-Stage doctor` followed by `-Stage all` means something.
 function Invoke-Doctor {
+    param([switch]$NoExit)
     $blockers = 0
     Say 'FreeChat desktop - preparation and toolchain'
     Say ''
@@ -417,7 +515,48 @@ function Invoke-Doctor {
     } else {
         Report 'visual studio' 'NOT found - install "Desktop development with C++"' -Blocking
         Say  '                    vswhere.exe and the usual install paths were both checked'
+        Say  '                    -Stage install does it'
         $blockers++
+    }
+    if ($vsPath) {
+        if (Test-VsToolset144 $vsPath) {
+            Report 'toolset 14.44' 'present'
+        } else {
+            Report 'toolset 14.44' 'MISSING - vcvarsall -vcvars_ver=14.44 will fail' -Blocking
+            Say  '                    add "MSVC v143 - VS 2022 C++ x64/x86 build tools (v14.44-17.14)"'
+            Say  '                    in the Visual Studio Installer, or run -Stage install'
+            $blockers++
+        }
+        if (Find-WantedSdk) {
+            Report 'windows sdk' '10.0.26100.0 (the one upstream builds with)'
+        } else {
+            Report 'windows sdk' '10.0.26100.0 not found - the newest installed one will be used'
+        }
+        if ($Arch -eq 'arm64' -or $RequestedArch -eq 'both') {
+            if (Test-VsArm64Tools $vsPath) {
+                Report 'arm64 tools' 'present'
+            } else {
+                Report 'arm64 tools' 'MISSING - "MSVC ARM64 build tools" is not in the default workload' -Blocking
+                Say  '                    -Stage install -Arch arm64 adds it'
+                $blockers++
+            }
+        }
+    }
+
+    # Long paths. Qt's own build tree nests deeper than the 260-character limit
+    # allows from a long checkout path, and the failure is a file that "does not
+    # exist" in the middle of a multi-hour stage. Upstream builds from D:\TBuild
+    # for this reason.
+    $longPaths = $null
+    try { $longPaths = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' -Name LongPathsEnabled -ErrorAction Stop).LongPathsEnabled } catch { }
+    if ($longPaths -eq 1) {
+        Report 'long paths' 'enabled'
+    } else {
+        Report 'long paths' 'not enabled (or unreadable) - keep the checkout path short'
+    }
+    if ($Root.Length -gt 40) {
+        Report 'path length' "$($Root.Length) characters: $Root"
+        Say  '                    long for a tree this deep. C:\fc or D:\TBuild is safer.'
     }
 
     $cmd = Get-Command git -ErrorAction SilentlyContinue
@@ -466,6 +605,9 @@ function Invoke-Doctor {
         Report 'prepared Qt' 'missing or half-written - -Stage prepare (~35GB, hours)' -Blocking
         $blockers++
     }
+    if ($Arch -eq 'arm64') {
+        Say  '                    (arm64 gets Qt 6; x86 and x64 get Qt 5.15 - upstream qt_version.py)'
+    }
 
     # The one hazard of sharing a tree with a macOS build: x86 and arm64 use the
     # same Libraries\ root that the macOS stages build in, and each stage starts by
@@ -490,8 +632,9 @@ function Invoke-Doctor {
         Report 'submodules' 'cannot check - no upstream checkout'
     }
 
-    if (Test-Path (Join-Path $Up 'out\Telegram.slnx')) {
-        Report 'build output' 'configured (out\Telegram.slnx)'
+    $sln = Find-Solution
+    if ($sln) {
+        Report 'build output' "configured ($sln)"
     } else {
         Report 'build output' 'not configured - -Stage configure'
     }
@@ -503,9 +646,191 @@ function Invoke-Doctor {
     Say ''
     if ($blockers -gt 0) {
         Say "  $blockers problem(s) above must be dealt with before a build."
-        exit 1
+        if (-not $NoExit) { exit 1 }
+        return
     }
     Say '  nothing blocking. next: -Stage all'
+}
+
+# --- installing what is missing ----------------------------------------------
+#
+# winget for Git and Python, Microsoft's own bootstrapper for Visual Studio Build
+# Tools -- the same https://aka.ms/vs/18/stable/vs_buildtools.exe and the same
+# component names upstream's CI uses to get the ARM64 tools
+# (.github/workflows/win.yml, "Install VS 2026 Build Tools."). Only what is
+# missing is installed: an existing Git, a working Python 3 or a Visual Studio
+# that already has everything is left alone.
+#
+# This is the one stage that changes the machine, so it says each thing before it
+# does it, and it never touches an existing Visual Studio -- Build Tools install
+# beside it, and Find-VsInstallPath picks whichever has the 14.44 toolset.
+
+function Test-IsAdmin {
+    try {
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        return ([Security.Principal.WindowsPrincipal]$identity).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch { return $false }
+}
+
+# A freshly installed tool is on the machine's PATH but not on this process's:
+# the environment was copied before the installer ran. Re-read it, so the checks
+# after an install see what the install did instead of reporting it missing.
+function Update-SessionPath {
+    $parts = @()
+    foreach ($scope in @('Machine', 'User')) {
+        $value = [System.Environment]::GetEnvironmentVariable('Path', $scope)
+        if ($value) { $parts += $value }
+    }
+    if ($parts.Count -gt 0) { $env:Path = ($parts -join ';') }
+}
+
+function Install-WithWinget {
+    param([string]$Id, [string]$Label)
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        Die @"
+winget is not available, and the install stage uses it for Git and Python.
+  It comes with "App Installer" from the Microsoft Store (Windows 10 1809+ / 11).
+  Or install these by hand and skip this stage:
+    Git        https://git-scm.com/download/win
+    Python 3   https://www.python.org/downloads/  (tick "Add python.exe to PATH")
+    Visual Studio 2026 Build Tools, "Desktop development with C++", plus the
+    14.44 toolset and the Windows 11 SDK 26100
+"@
+    }
+
+    Log "installing $Label ($Id) with winget"
+    Say "    `$ winget install --id $Id --exact --silent"
+    & winget install --id $Id --exact --source winget --silent --accept-package-agreements --accept-source-agreements
+    $code = $LASTEXITCODE
+    # -1978335189 is winget's "already installed, nothing to upgrade".
+    if ($code -ne 0 -and $code -ne -1978335189) {
+        Die "winget could not install $Label (exit $code). Install it by hand and run this again."
+    }
+    Update-SessionPath
+}
+
+function Install-VisualStudioBuildTools {
+    param([bool]$WithArm64)
+    $url = 'https://aka.ms/vs/18/stable/vs_buildtools.exe'
+    $exe = Join-Path ([System.IO.Path]::GetTempPath()) 'vs_buildtools.exe'
+    Log 'downloading the Visual Studio Build Tools installer'
+    Say "    `$ $url"
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $url -OutFile $exe -UseBasicParsing
+    } catch {
+        Die "could not download $url : $($_.Exception.Message)"
+    }
+
+    # What the build needs, by Microsoft's component ids:
+    #   Workload.VCTools                       the C++ build tools
+    #   VC.14.44.17.14.x86.x64                 the toolset -vcvars_ver=14.44 selects
+    #   Windows11SDK.26100                     upstream's SDK (building-win.md)
+    #   VC.CMake.Project                       the cmake and ninja that vcvars puts on PATH
+    #   VC.ATL                                 ATL, which the app and its libraries use
+    $components = @(
+        'Microsoft.VisualStudio.Workload.VCTools',
+        'Microsoft.VisualStudio.Component.VC.14.44.17.14.x86.x64',
+        'Microsoft.VisualStudio.Component.Windows11SDK.26100',
+        'Microsoft.VisualStudio.Component.VC.CMake.Project',
+        'Microsoft.VisualStudio.Component.VC.ATL'
+    )
+    if ($WithArm64) {
+        $components += @(
+            'Microsoft.VisualStudio.Component.VC.Tools.ARM64',
+            'Microsoft.VisualStudio.Component.VC.14.44.17.14.ARM64',
+            'Microsoft.VisualStudio.Component.VC.ATL.ARM64'
+        )
+    }
+    $installerArgs = @('--quiet', '--wait', '--norestart', '--nocache')
+    foreach ($c in $components) { $installerArgs += @('--add', $c) }
+
+    Log 'installing Visual Studio Build Tools (several GB; a few minutes to half an hour)'
+    Say "    `$ vs_buildtools.exe $($installerArgs -join ' ')"
+    $process = $null
+    if (Test-IsAdmin) {
+        $process = Start-Process -FilePath $exe -ArgumentList $installerArgs -Wait -PassThru
+    } else {
+        Say '    asking for administrator rights (a UAC prompt will appear)'
+        try {
+            $process = Start-Process -FilePath $exe -ArgumentList $installerArgs -Wait -PassThru -Verb RunAs
+        } catch {
+            Die "the Visual Studio installer needs administrator rights and did not get them: $($_.Exception.Message)"
+        }
+    }
+    Remove-Item -Force $exe -ErrorAction SilentlyContinue
+    # 3010 is "success, a reboot is needed".
+    if ($process.ExitCode -ne 0 -and $process.ExitCode -ne 3010) {
+        Die "the Visual Studio installer failed (exit $($process.ExitCode)). Its log is under $env:TEMP (dd_*.log)."
+    }
+    if ($process.ExitCode -eq 3010) { Warn 'Visual Studio asks for a reboot before the build.' }
+}
+
+function Invoke-Install {
+    Log 'checking what is missing'
+    $needArm64 = ($Arch -eq 'arm64' -or $RequestedArch -eq 'both')
+
+    try {
+        $drive = (Get-Item $Root).PSDrive
+        $freeGb = [math]::Round($drive.Free / 1GB)
+        if ($freeGb -lt 80) {
+            Warn "only ${freeGb}GB free on $($drive.Name): - the tools take ~10GB and prepare ~35GB more (60GB+ in all)"
+        }
+    } catch { }
+
+    if (Get-Command git -ErrorAction SilentlyContinue) {
+        Say '    git: present'
+    } else {
+        Install-WithWinget 'Git.Git' 'Git for Windows'
+    }
+    if (Get-Command git -ErrorAction SilentlyContinue) {
+        # Qt's source tree nests deeper than 260 characters; per-user, harmless.
+        & git config --global core.longpaths true
+    }
+
+    $python = Get-PythonCommand
+    if ($python) {
+        Say "    python 3: $python"
+    } else {
+        # 3.12: the interpreter upstream's own CI runners carry. Overridable for a
+        # machine that needs another.
+        $pythonId = $env:FREECHAT_PYTHON_WINGET_ID
+        if (-not $pythonId) { $pythonId = 'Python.Python.3.12' }
+        Install-WithWinget $pythonId 'Python 3'
+        if (-not (Get-PythonCommand)) {
+            Warn 'Python is installed but `python` still does not resolve to it.'
+            Warn '  Turn off the Microsoft Store alias: Settings > Apps > Advanced app settings >'
+            Warn '  App execution aliases (python.exe and python3.exe), then open a new terminal.'
+        }
+    }
+
+    $vs = Find-VsInstallPath
+    $haveToolset = Test-VsToolset144 $vs
+    $haveArm64 = Test-VsArm64Tools $vs
+    if ($vs -and $haveToolset -and (-not $needArm64 -or $haveArm64)) {
+        Say "    visual studio: $vs (14.44 toolset present)"
+    } else {
+        if ($vs) { Say "    visual studio: $vs - but missing components, adding Build Tools beside it" }
+        Install-VisualStudioBuildTools $needArm64
+    }
+
+    Update-SessionPath
+    Say ''
+    Log 'install finished - checking the result'
+    Say '    (a terminal opened BEFORE the install does not see the new PATH; open a new one if the check below disagrees)'
+    Invoke-Doctor -NoExit
+    Say ''
+    Say '  Anything still listed above that is not a tool (the upstream tree, the overlay,'
+    Say '  the prepared Qt, the submodules) is a step of the build itself, not of this stage:'
+    Say '  bootstrap.sh and apply-overlay.sh from Git Bash, then -Stage all.'
+}
+
+# Install is dispatched before the per-architecture passes below: it runs once, and
+# for -Arch both it installs the tools of both architectures in that one run.
+# It exists for the machine that cannot pass the checks further down yet.
+if ($Stage -eq 'install') {
+    Invoke-Install
+    exit 0
 }
 
 # --- both architectures -----------------------------------------------------
@@ -591,13 +916,43 @@ Visual Studio was not found, and it is required to build.
         if (-not (Test-Path $vcvars)) {
             Die "vcvarsall.bat is missing under $vs - the C++ workload is not installed."
         }
+        # The SDK upstream builds with, when it is installed (see Find-WantedSdk).
+        $sdk = Find-WantedSdk
+        $sdkArg = ''
+        if ($sdk) { $sdkArg = "$sdk " }
+        if (-not (Test-VsToolset144 $vs)) {
+            Warn "the 14.44 toolset is not installed in ${vs}: vcvarsall -vcvars_ver=14.44 will fail."
+            Warn '  powershell -File scripts\build-desktop.ps1 -Stage install   adds it.'
+        }
         Log "visual studio: initialising the $Arch environment"
-        Say "    $ `"$vcvars`" $Arch -vcvars_ver=14.44"
+        Say "    $ `"$vcvars`" $Arch $sdkArg-vcvars_ver=14.44"
+        # A batch file, not one long `cmd /c "a && set X=1 && b"` line. In cmd,
+        # `set Platform=x64 && next` stores "x64 " WITH the space before the &&,
+        # so Platform came out as "x64 " -- which is not 'x64' to prepare.py
+        # (os.environ['Platform'] == 'x64'), and the very next stage refused to
+        # start with "Make sure to run from Native Tools Command Prompt". The
+        # quoted `set "X=Y"` form has no such trailing space, and a file also
+        # leaves nothing for cmd's quote-stripping rules to get wrong.
+        #
         # Platform is set AFTER vcvarsall, so that prepare.py reads the value this
         # environment actually is, whether or not vcvarsall sets it itself.
-        $inner = "powershell -NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Stage $Stage -Arch $Arch"
-        & cmd /c "`"$vcvars`" $Arch -vcvars_ver=14.44 && set Platform=$Arch && set $VsReadyVar=1 && $inner"
-        $code = $LASTEXITCODE
+        $batLines = @(
+            '@echo off',
+            "call `"$vcvars`" $Arch $sdkArg-vcvars_ver=14.44",
+            'if errorlevel 1 exit /b %errorlevel%',
+            "set `"Platform=$Arch`"",
+            "set `"$VsReadyVar=1`"",
+            "powershell -NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Stage $Stage -Arch $Arch",
+            'exit /b %errorlevel%'
+        )
+        $bat = Join-Path ([System.IO.Path]::GetTempPath()) "freechat-vs-$PID.cmd"
+        [System.IO.File]::WriteAllText($bat, (($batLines -join "`r`n") + "`r`n"), [System.Text.Encoding]::ASCII)
+        try {
+            & cmd /c "`"$bat`""
+            $code = $LASTEXITCODE
+        } finally {
+            Remove-Item -Force $bat -ErrorAction SilentlyContinue
+        }
         if ($code -ne 0) {
             Warn "the Visual Studio environment could not be initialised for $Arch (exit $code)."
             if ($Arch -eq 'arm64') {
@@ -609,6 +964,16 @@ Visual Studio was not found, and it is required to build.
         }
         exit $code
     }
+}
+
+# An environment opened by hand (or inherited) can be the right architecture and the
+# wrong toolset: VS 2026's default v145 cannot target Windows 7, which upstream
+# still supports, and the failure appears hours into prepare. VCToolsVersion is
+# what vcvars sets, so it says which one this really is.
+if ($env:VCToolsVersion -and -not $env:VCToolsVersion.StartsWith('14.44')) {
+    Warn "the Visual Studio environment uses toolset $($env:VCToolsVersion), not 14.44."
+    Warn '  Upstream requires -vcvars_ver=14.44; open a new terminal and let this script'
+    Warn '  initialise it, or see the hint at the top of the file.'
 }
 
 # --- the phases that used to be silent --------------------------------------
@@ -863,9 +1228,15 @@ function Invoke-Prepare {
 
     # The command, before it runs: a log is kept so that "which command, exactly"
     # has an answer.
-    Say '    $ Telegram\build\prepare\win.bat'
+    #
+    # `silent` is upstream's own flag for an unattended run (its CI passes it): a
+    # stage whose recipe changed since it was built is rebuilt, where without it
+    # prepare.py stops and waits for a keypress ("(r)ebuild, (s)kip, (q)uit?") --
+    # forever, in a run nobody is watching. A fresh tree never reaches that
+    # prompt, but a resumed or updated one does.
+    Say '    $ Telegram\build\prepare\win.bat silent'
     Push-Location $Up
-    try { & cmd /c 'Telegram\build\prepare\win.bat'; if ($LASTEXITCODE -ne 0) { Die 'prepare\win.bat failed' } }
+    try { & cmd /c 'Telegram\build\prepare\win.bat silent'; if ($LASTEXITCODE -ne 0) { Die 'prepare\win.bat failed' } }
     finally { Pop-Location }
 }
 
@@ -905,20 +1276,23 @@ function Invoke-Configure {
 }
 
 function Invoke-Build {
-    $sln = Join-Path $Up 'out\Telegram.slnx'
-    if (-not (Test-Path $sln)) { Die "not configured yet - run this script with -Stage configure" }
+    $sln = Find-Solution
+    if (-not $sln) { Die "not configured yet - run this script with -Stage configure" }
     Assert-PreparedQt
     # msbuild when it is available, so the build can run unattended; otherwise
     # say what to open rather than pretending to build.
     $msbuild = Get-Command msbuild -ErrorAction SilentlyContinue
     if ($msbuild) {
         Log "building with msbuild (Release, $(Get-MsbuildPlatform))"
-        Say "    $ msbuild $sln /p:Configuration=Release /p:Platform=$(Get-MsbuildPlatform) /m"
-        & msbuild $sln /p:Configuration=Release /p:Platform=$(Get-MsbuildPlatform) /m
+        # /t:Telegram is "Build Telegram" from upstream's instructions: the app and
+        # what it depends on. The whole solution would also build the Updater,
+        # the Packer and cmake's ALL_BUILD for nothing a run of the client needs.
+        Say "    $ msbuild $sln /t:Telegram /p:Configuration=Release /p:Platform=$(Get-MsbuildPlatform) /m"
+        & msbuild $sln /t:Telegram /p:Configuration=Release /p:Platform=$(Get-MsbuildPlatform) /m
         if ($LASTEXITCODE -ne 0) { Die 'msbuild failed' }
         Log "result under $Up\out\Release"
     } else {
-        Warn "msbuild is not on PATH. Open $sln in Visual Studio 2026, select the"
+        Warn "msbuild is not on PATH. Open $sln in Visual Studio, select the"
         Warn 'Telegram project and Build > Build Telegram (Debug or Release).'
     }
 }

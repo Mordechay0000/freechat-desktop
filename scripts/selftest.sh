@@ -416,6 +416,53 @@ else
   printf '  \033[1;33m-\033[0m PowerShell parse NOT RUN (pwsh not installed)\n'
 fi
 
+# --- the Windows script's facts about upstream ------------------------------
+# Two bugs that no parser sees and that only a Windows run would have shown, hours
+# in. Both are checked against what upstream actually does.
+#
+# 1. x86 and x64 build Qt 5.15 (Telegram/build/qt_version.py; only arm64 or an
+#    explicit `qt6` gets Qt 6), so a COMPLETE x64 prepare leaves Qt5Config.cmake and
+#    no Qt6 file. A check for Qt6 alone called that "missing" and refused to
+#    configure.
+# 2. In cmd, `set Platform=x64 && next` stores "x64 " WITH the trailing space, which
+#    prepare.py's `os.environ['Platform'] == 'x64'` rejects. The quoted form
+#    `set "Platform=x64"` has no such space.
+ps1="$ROOT/scripts/build-desktop.ps1"
+if [[ -f "$ps1" ]]; then
+  if grep -q 'Qt5Config.cmake' "$ps1" && grep -q 'Qt6Config.cmake' "$ps1"; then
+    ok "build-desktop.ps1 recognises both Qt5 (x86/x64) and Qt6 (arm64) installs"
+  else
+    bad "build-desktop.ps1 must accept Qt5Config.cmake as well as Qt6Config.cmake (x64 builds Qt 5.15)"
+  fi
+  if grep -nE 'set +[A-Za-z_]+=[^"&]*[^ "&] *&&' "$ps1" | grep -v '^\s*[0-9]*:\s*#' | grep -q .; then
+    bad "build-desktop.ps1 chains an unquoted cmd 'set X=Y &&': the value keeps a trailing space"
+  else
+    ok "build-desktop.ps1 sets cmd variables in the quoted form (no trailing space)"
+  fi
+  # Functional check of the Qt lookup, when pwsh can run it: the same function the
+  # script uses, against fixtures shaped like prepare's real output.
+  if command -v pwsh >/dev/null 2>&1; then
+    qt_out="$(PS1="$ps1" FX="$TMP/qtfx" pwsh -NoProfile -NonInteractive -Command '
+      $t = $null; $e = $null
+      $ast = [System.Management.Automation.Language.Parser]::ParseFile($env:PS1, [ref]$t, [ref]$e)
+      $fn = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq "Find-PreparedQt" }, $true)[0]
+      . ([scriptblock]::Create($fn.Extent.Text))
+      $fx = $env:FX
+      New-Item -ItemType Directory -Force "$fx/x64/Qt-5.15.19/lib/cmake/Qt5", "$fx/arm/Qt-6.11.1/lib/cmake/Qt6", "$fx/half/Qt-5.15.19/lib" | Out-Null
+      New-Item -ItemType File -Force "$fx/x64/Qt-5.15.19/lib/cmake/Qt5/Qt5Config.cmake", "$fx/arm/Qt-6.11.1/lib/cmake/Qt6/Qt6Config.cmake" | Out-Null
+      $r = @()
+      $r += [bool](Find-PreparedQt "$fx/x64")
+      $r += [bool](Find-PreparedQt "$fx/arm")
+      $r += [bool](Find-PreparedQt "$fx/half")
+      $r -join ","' 2>&1)"
+    if [[ "$qt_out" == "True,True,False" ]]; then
+      ok "Find-PreparedQt: Qt5 found, Qt6 found, half-written install rejected"
+    else
+      bad "Find-PreparedQt gave '$qt_out' (want True,True,False)"
+    fi
+  fi
+fi
+
 # --- configuration files are parsed, never executed ------------------------
 # This bug was fixed once and came back. `set -a; . file; set +a` runs the file
 # as a shell script, so a value with a space in it is not a value:
