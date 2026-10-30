@@ -25,50 +25,54 @@ jobs:
     env:
       ARCH: ${{ inputs.arch || 'x64' }}
     steps:
-      # The Qt tree is deeper than 260 characters. The workspace is D:\a\...\...,
-      # so the repository is cloned to a short path instead of actions/checkout's.
-      - name: Clone to C:\fc
+      # The Qt tree is deeper than 260 characters, so the repository goes to a short
+      # path instead of actions/checkout's. D: and not C:, because prepare needs
+      # ~45GB and the image leaves C: with ~30GB free (D: has ~78GB).
+      - name: Clone to D:\fc
         shell: bash
         env:
           TOKEN: ${{ github.token }}
         run: |
           git config --global core.longpaths true
-          git clone "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}" /c/fc
-          git -C /c/fc checkout "${GITHUB_SHA}"
+          git clone "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}" /d/fc
+          git -C /d/fc checkout "${GITHUB_SHA}"
 
       - name: Disk before
         run: Get-PSDrive C, D | Format-Table Name, Used, Free
 
       - name: Bootstrap and overlay
         shell: bash
-        working-directory: C:\fc
+        working-directory: D:\fc
         run: |
           cp freechat.env.example freechat.env
           ./scripts/bootstrap.sh desktop --with-submodules
           ./scripts/apply-overlay.sh
 
       - name: Install missing tools
-        working-directory: C:\fc
+        working-directory: D:\fc
         run: powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage install -Arch $env:ARCH
 
+      # Informational: it reports "prepared Qt missing" as a blocking problem before
+      # prepare has run, which is the expected state here.
       - name: Doctor
-        working-directory: C:\fc
+        continue-on-error: true
+        working-directory: D:\fc
         run: powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage doctor -Arch $env:ARCH
 
       - name: Prepare (Qt and libraries)
-        working-directory: C:\fc
+        working-directory: D:\fc
         run: powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage prepare -Arch $env:ARCH
 
       - name: Configure
-        working-directory: C:\fc
+        working-directory: D:\fc
         run: powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage configure -Arch $env:ARCH
 
       - name: Build
-        working-directory: C:\fc
+        working-directory: D:\fc
         run: powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage build -Arch $env:ARCH
 
       - name: Package
-        working-directory: C:\fc
+        working-directory: D:\fc
         run: |
           $rel = "desktop\upstream\out\Release"
           Get-ChildItem $rel | Format-Table Name, Length
@@ -79,12 +83,12 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: FreeChat-windows-${{ env.ARCH }}
-          path: C:\fc\${{ env.ZIP }}
+          path: D:\fc\${{ env.ZIP }}
           if-no-files-found: error
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/v')
-        working-directory: C:\fc
+        working-directory: D:\fc
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
