@@ -13,7 +13,13 @@ on:
         default: x64
   push:
     branches: [auto/inspiring-gauss-9eryy9]
+    paths-ignore: [".github/workflows/msys2-diag.yml"]
     tags: ["v*"]
+
+# A newer push replaces a run that is still going: a full run takes hours.
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: write   # only used to attach the zip to a release
@@ -62,6 +68,17 @@ jobs:
       - name: Prepare (Qt and libraries)
         working-directory: D:\fc
         run: powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage prepare -Arch $env:ARCH
+
+      # What the log alone cannot show: the library that prepare was configuring
+      # when it stopped, and what the build left where it was looked for.
+      - name: Why prepare failed
+        if: failure()
+        working-directory: D:\fc
+        run: |
+          $ff = "desktop\Libraries\win64\ffmpeg\ffbuild\config.log"
+          if (Test-Path $ff) { "--- tail of $ff"; Get-Content $ff -Tail 80 }
+          "--- pkg-config files under Libraries"
+          Get-ChildItem desktop\Libraries -Recurse -Filter *.pc -ErrorAction SilentlyContinue | Select-Object -First 40 FullName
 
       - name: Configure
         working-directory: D:\fc
