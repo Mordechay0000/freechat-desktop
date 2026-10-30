@@ -1,8 +1,11 @@
 name: msys2-diag
 
-# One-off: does the pkgconf that MSYS2 ships today still find a .pc file through
-# PKG_CONFIG_PATH the way upstream's build_ffmpeg_win.sh sets it? ffmpeg's
-# configure failed with "dav1d >= 0.5.0 not found using pkg-config".
+# One-off: ffmpeg's configure (run from prepare) says "Package dav1d was not found
+# in the pkg-config search path" although dav1d.pc exists in
+# Libraries\win64\local\lib\pkgconfig. Reproduce prepare's shell environment:
+# a NON-login msys bash with MSYS2_PATH_TYPE=inherit and the Windows PATH, a
+# dav1d.pc whose prefix has the backslashes meson copies from --prefix, and the
+# runner's own PKG_CONFIG_PATH if it has one.
 on:
   push:
     branches: [auto/inspiring-gauss-9eryy9]
@@ -12,7 +15,25 @@ jobs:
   diag:
     runs-on: windows-2025
     steps:
-      - name: pkgconf and PKG_CONFIG_PATH
+      - name: Runner environment
+        shell: pwsh
+        run: |
+          "PKG_CONFIG_PATH = [$env:PKG_CONFIG_PATH]"
+          "PKG_CONFIG = [$env:PKG_CONFIG]"
+          Get-ChildItem env: | Where-Object Name -match 'PKG|MSYS' | Format-Table -AutoSize
+
+      - name: Reproduce
         shell: cmd
         run: |
-          C:\msys64\usr\bin\bash.exe -lc "pacman -S --noconfirm mingw-w64-x86_64-pkgconf >/dev/null; export PATH=/mingw64/bin:$PATH; which pkg-config pkgconf; pkg-config --version; mkdir -p /d/x/Libraries/local/lib/pkgconfig /d/x/Libraries/ffmpeg; printf 'prefix=/d/x\nlibdir=${prefix}/lib\nName: dav1d\nDescription: t\nVersion: 1.5.4\nLibs: -L${libdir} -ldav1d\n' > /d/x/Libraries/local/lib/pkgconfig/dav1d.pc; cd /d/x/Libraries/ffmpeg; FullExecPath=$PWD; echo '--- script style (/d/...:)'; export PKG_CONFIG_PATH=\"$FullExecPath/../local/lib/pkgconfig:$PKG_CONFIG_PATH\"; echo $PKG_CONFIG_PATH; pkg-config --exists --print-errors 'dav1d >= 0.5.0'; echo exit=$?; echo '--- windows style'; export PKG_CONFIG_PATH=\"$(cygpath -m /d/x/Libraries/local/lib/pkgconfig)\"; echo $PKG_CONFIG_PATH; pkg-config --exists --print-errors 'dav1d >= 0.5.0'; echo exit=$?; echo '--- debug'; pkg-config --list-all | head; pkg-config --variable pc_path pkg-config"
+          C:\msys64\usr\bin\bash.exe -lc "pacman -S --noconfirm mingw-w64-x86_64-pkgconf > /dev/null 2>&1; echo pkgconf installed"
+          mkdir D:\fc\desktop\Libraries\win64\local\lib\pkgconfig
+          mkdir D:\fc\desktop\Libraries\win64\ffmpeg
+          mkdir D:\fc\desktop\Libraries\win64\patches
+          (echo prefix=D:\fc\desktop\Libraries\win64/local& echo libdir=${prefix}/lib& echo Name: dav1d& echo Description: AV1 decoder& echo Version: 1.5.4& echo Libs: -L${libdir} -ldav1d) > D:\fc\desktop\Libraries\win64\local\lib\pkgconfig\dav1d.pc
+          type D:\fc\desktop\Libraries\win64\local\lib\pkgconfig\dav1d.pc
+          set MSYS2_PATH_TYPE=inherit
+          set CHERE_INVOKING=enabled_from_arguments
+          set PATH=C:\msys64\usr\bin;C:\msys64\mingw64\bin;%PATH%
+          cd /d D:\fc\desktop\Libraries\win64\ffmpeg
+          echo === non-login bash, script-style PKG_CONFIG_PATH
+          C:\msys64\usr\bin\bash.exe -c "FullExecPath=$PWD; export PKG_CONFIG_PATH=\"$FullExecPath/../local/lib/pkgconfig:$PKG_CONFIG_PATH\"; echo PKG_CONFIG_PATH=$PKG_CONFIG_PATH; which pkg-config; pkg-config --exists --print-errors 'dav1d >= 0.5.0'; echo exit=$?; echo === what native sees; cmd //c 'echo %PKG_CONFIG_PATH%'"
