@@ -66,6 +66,9 @@ jobs:
         run: powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage doctor -Arch $env:ARCH
 
       - name: Prepare (Qt and libraries)
+        # A run was seen to go silent mid-compile for over an hour (libvpx, no error,
+        # no output). Without this the job would sit until GitHub's 6-hour limit.
+        timeout-minutes: 240
         working-directory: D:\fc
         run: powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage prepare -Arch $env:ARCH
 
