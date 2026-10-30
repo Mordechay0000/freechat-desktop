@@ -194,6 +194,21 @@ function Test-VsToolset144 {
     return [bool]$found
 }
 
+# Does the 14.44 toolset have ATL? breakpad (a library prepare builds) includes
+# atlbase.h, and vcvarsall -vcvars_ver=14.44 puts only that toolset's atlmfc on
+# INCLUDE -- an ATL installed for another toolset does not help. Checked
+# separately from Test-VsToolset144 on purpose: Visual Studio images ship the
+# toolset without ATL, so "the toolset is there" says nothing about ATL, and the
+# failure comes an hour into prepare as "Cannot open include file: 'atlbase.h'".
+function Test-VsAtl144 {
+    param([string]$VsPath)
+    if (-not $VsPath) { return $false }
+    foreach ($dir in @(Get-ChildItem -Path (Join-Path $VsPath 'VC\Tools\MSVC') -Directory -Filter '14.44*' -ErrorAction SilentlyContinue)) {
+        if (Test-Path (Join-Path $dir.FullName 'atlmfc\include\atlbase.h')) { return $true }
+    }
+    return $false
+}
+
 # The Windows SDK upstream builds with (docs/building-win.md: "10.0.26100.0 SDK
 # version"; its CI passes the same number to the environment setup). Returns the
 # version when that SDK is installed, else nothing -- the caller then lets
@@ -527,6 +542,16 @@ function Invoke-Doctor {
             Say  '                    in the Visual Studio Installer, or run -Stage install'
             $blockers++
         }
+        if (Test-VsToolset144 $vsPath) {
+            if (Test-VsAtl144 $vsPath) {
+                Report 'atl 14.44' 'present'
+            } else {
+                Report 'atl 14.44' 'MISSING - prepare fails in breakpad (atlbase.h)' -Blocking
+                Say  '                    add "C++ ATL for v143 build tools (x86 & x64)" in the Visual Studio'
+                Say  '                    Installer, or run -Stage install'
+                $blockers++
+            }
+        }
         if (Find-WantedSdk) {
             Report 'windows sdk' '10.0.26100.0 (the one upstream builds with)'
         } else {
@@ -728,12 +753,14 @@ function Install-VisualStudioBuildTools {
     #   Windows11SDK.26100                     upstream's SDK (building-win.md)
     #   VC.CMake.Project                       the cmake and ninja that vcvars puts on PATH
     #   VC.ATL                                 ATL, which the app and its libraries use
+    #   VC.14.44.17.14.ATL                     ATL for the 14.44 toolset specifically
     $components = @(
         'Microsoft.VisualStudio.Workload.VCTools',
         'Microsoft.VisualStudio.Component.VC.14.44.17.14.x86.x64',
         'Microsoft.VisualStudio.Component.Windows11SDK.26100',
         'Microsoft.VisualStudio.Component.VC.CMake.Project',
-        'Microsoft.VisualStudio.Component.VC.ATL'
+        'Microsoft.VisualStudio.Component.VC.ATL',
+        'Microsoft.VisualStudio.Component.VC.14.44.17.14.ATL'
     )
     if ($WithArm64) {
         $components += @(
@@ -759,6 +786,40 @@ function Install-VisualStudioBuildTools {
         }
     }
     Remove-Item -Force $exe -ErrorAction SilentlyContinue
+    # 3010 is "success, a reboot is needed".
+    if ($process.ExitCode -ne 0 -and $process.ExitCode -ne 3010) {
+        Die "the Visual Studio installer failed (exit $($process.ExitCode)). Its log is under $env:TEMP (dd_*.log)."
+    }
+    if ($process.ExitCode -eq 3010) { Warn 'Visual Studio asks for a reboot before the build.' }
+}
+
+# Add components to a Visual Studio that is already installed, through its own
+# installer. Used instead of installing Build Tools beside it: a second install
+# would leave two Visual Studios, and Find-VsInstallPath may well pick the one
+# that still lacks the component. Verified on a windows-2025 runner (Visual
+# Studio 18 Enterprise): adding VC.14.44.17.14.ATL took ~10 minutes, exit 0, and
+# put atlbase.h under VC\Tools\MSVC\14.44.*\atlmfc\include.
+function Add-VisualStudioComponents {
+    param([string]$VsPath, [string[]]$Components)
+    $setup = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\setup.exe'
+    if (-not (Test-Path $setup)) {
+        Die "the Visual Studio Installer is not at $setup, so $($Components -join ', ') cannot be added to $VsPath. Add it in the Visual Studio Installer and run this again."
+    }
+    $installerArgs = @('modify', '--installPath', "`"$VsPath`"", '--quiet', '--norestart', '--noUpdateInstaller')
+    foreach ($c in $Components) { $installerArgs += @('--add', $c) }
+    Log "adding $($Components -join ', ') to $VsPath (several minutes)"
+    Say "    `$ setup.exe $($installerArgs -join ' ')"
+    $process = $null
+    if (Test-IsAdmin) {
+        $process = Start-Process -FilePath $setup -Wait -PassThru -ArgumentList $installerArgs
+    } else {
+        Say '    asking for administrator rights (a UAC prompt will appear)'
+        try {
+            $process = Start-Process -FilePath $setup -Wait -PassThru -Verb RunAs -ArgumentList $installerArgs
+        } catch {
+            Die "the Visual Studio installer needs administrator rights and did not get them: $($_.Exception.Message)"
+        }
+    }
     # 3010 is "success, a reboot is needed".
     if ($process.ExitCode -ne 0 -and $process.ExitCode -ne 3010) {
         Die "the Visual Studio installer failed (exit $($process.ExitCode)). Its log is under $env:TEMP (dd_*.log)."
@@ -807,8 +868,13 @@ function Invoke-Install {
     $vs = Find-VsInstallPath
     $haveToolset = Test-VsToolset144 $vs
     $haveArm64 = Test-VsArm64Tools $vs
-    if ($vs -and $haveToolset -and (-not $needArm64 -or $haveArm64)) {
-        Say "    visual studio: $vs (14.44 toolset present)"
+    $haveAtl = Test-VsAtl144 $vs
+    if ($vs -and $haveToolset -and (-not $needArm64 -or $haveArm64) -and $haveAtl) {
+        Say "    visual studio: $vs (14.44 toolset and ATL present)"
+    } elseif ($vs -and $haveToolset -and (-not $needArm64 -or $haveArm64)) {
+        # Only ATL is missing. Add it to this install rather than a second one.
+        Say "    visual studio: $vs - 14.44 toolset present, but not its ATL"
+        Add-VisualStudioComponents $vs @('Microsoft.VisualStudio.Component.VC.14.44.17.14.ATL')
     } else {
         if ($vs) { Say "    visual studio: $vs - but missing components, adding Build Tools beside it" }
         Install-VisualStudioBuildTools $needArm64
