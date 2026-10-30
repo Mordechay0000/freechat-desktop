@@ -296,6 +296,21 @@ PYMAC
     '        mingw-w64-x86_64-diffutils ^
 ' '        diffutils ^
 '
+  # ffmpeg's configure could not find dav1d on Windows ("Package dav1d was not
+  # found in the pkg-config search path") although dav1d.pc sits in
+  # Libraries\win64\local\lib\pkgconfig. upstream's build_ffmpeg_win.sh sets
+  #   PKG_CONFIG_PATH="<dir>:$PKG_CONFIG_PATH"
+  # and prepare runs it from a non-login MSYS bash, where $PKG_CONFIG_PATH is
+  # empty -- so the value ends in a bare colon. MSYS only converts a POSIX path
+  # list to Windows form for a native program (the mingw pkgconf) when every
+  # entry is a POSIX path, and this one is not converted; a Windows-style entry
+  # breaks the conversion too. A POSIX default makes the list convert.
+  # Reproduced and verified on a windows-2025 runner on 2026-10-30.
+  py_run "$HOOK" "$up/Telegram/build/prepare/prepare.py" \
+    '    SET "ARCH_PARAM="
+' '    SET PKG_CONFIG_PATH=/usr/lib/pkgconfig
+    SET "ARCH_PARAM="
+'
 
   local header="$up/Telegram/SourceFiles/freechat/freechat_builtin.h"
   py_run - "$header" "$BRAND_NAME" "${BRAND_SERVER_DESCRIPTION:-}" \
