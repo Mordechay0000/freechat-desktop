@@ -29,9 +29,11 @@ jobs:
       # so the repository is cloned to a short path instead of actions/checkout's.
       - name: Clone to C:\fc
         shell: bash
+        env:
+          TOKEN: ${{ github.token }}
         run: |
           git config --global core.longpaths true
-          git clone "https://github.com/${GITHUB_REPOSITORY}" /c/fc
+          git clone "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}" /c/fc
           git -C /c/fc checkout "${GITHUB_SHA}"
 
       - name: Disk before
