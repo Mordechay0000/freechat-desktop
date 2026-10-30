@@ -37,6 +37,10 @@ jobs:
           cd /d D:\fc\desktop\Libraries\win64\ffmpeg
           echo === non-login bash, script-style PKG_CONFIG_PATH
           C:\msys64\usr\bin\bash.exe -c "FullExecPath=$PWD; export PKG_CONFIG_PATH=\"$FullExecPath/../local/lib/pkgconfig:$PKG_CONFIG_PATH\"; echo PKG_CONFIG_PATH=$PKG_CONFIG_PATH; which pkg-config; pkg-config --exists --print-errors 'dav1d >= 0.5.0'; echo exit=$?; echo === what native sees; cmd //c 'echo %PKG_CONFIG_PATH%'"
-          echo === fix candidate: PKG_CONFIG_PATH set from cmd before bash
-          set PKG_CONFIG_PATH=D:\fc\desktop\Libraries\win64\local\lib\pkgconfig
-          C:\msys64\usr\bin\bash.exe -c "FullExecPath=$PWD; export PKG_CONFIG_PATH=\"$FullExecPath/../local/lib/pkgconfig:$PKG_CONFIG_PATH\"; echo PKG_CONFIG_PATH=$PKG_CONFIG_PATH; pkg-config --exists --print-errors 'dav1d >= 0.5.0'; echo exit=$?; pkg-config --cflags --libs dav1d"
+          echo === fix candidate A: cmd sets a POSIX-style default
+          set PKG_CONFIG_PATH=/usr/lib/pkgconfig
+          C:\msys64\usr\bin\bash.exe -c "FullExecPath=$PWD; export PKG_CONFIG_PATH=\"$FullExecPath/../local/lib/pkgconfig:$PKG_CONFIG_PATH\"; echo PKG_CONFIG_PATH=$PKG_CONFIG_PATH; pkg-config --exists --print-errors 'dav1d >= 0.5.0'; echo exitA=$?; pkg-config --cflags --libs dav1d"
+          echo === fix candidate B: two POSIX entries
+          set PKG_CONFIG_PATH=/usr/lib/pkgconfig:/usr/share/pkgconfig
+          C:\msys64\usr\bin\bash.exe -c "FullExecPath=$PWD; export PKG_CONFIG_PATH=\"$FullExecPath/../local/lib/pkgconfig:$PKG_CONFIG_PATH\"; pkg-config --exists --print-errors 'dav1d >= 0.5.0'; echo exitB=$?"
+          exit /b 0
