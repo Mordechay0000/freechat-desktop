@@ -285,6 +285,17 @@ PYMAC
     '        -D WITH_EXAMPLES=OFF \\
         -D WITH_GDK_PIXBUF=OFF
     cmake --build . --config MinSizeRel'
+  # The MSYS2 repositories no longer carry mingw-w64-x86_64-diffutils (checked on
+  # a windows-2025 runner, 2026-10-30): the mingw64 repository has gperf, nasm,
+  # perl and pkgconf, but diffutils now exists only as the msys package
+  # "diffutils" (and under ucrt64/clang64). prepare.py pins the MSYS2 installer
+  # but runs "pacman -Syu" against today's repositories, so the stage failed with
+  # "target not found". The msys package installs into usr\bin, which the stage
+  # already puts first on PATH.
+  py_run "$HOOK" "$up/Telegram/build/prepare/prepare.py" \
+    '        mingw-w64-x86_64-diffutils ^
+' '        diffutils ^
+'
 
   local header="$up/Telegram/SourceFiles/freechat/freechat_builtin.h"
   py_run - "$header" "$BRAND_NAME" "${BRAND_SERVER_DESCRIPTION:-}" \
