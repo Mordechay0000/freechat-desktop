@@ -1,32 +1,15 @@
 name: msys2-diag
 
-# One-off: Build died with System.OutOfMemoryException inside
-# TrackedVCToolTask.LogSarifOutput (MSBuild parsing the compiler's structured/JSON
-# diagnostics). Which MSBuild property turns structured output off in this Visual
-# Studio, and how much memory does the runner have?
+# One-off probe. The previous Windows diagnostic jobs failed within 2 seconds with
+# no steps and no log, twice. Does a trivial Linux job start at all? If not, the
+# problem is the account (minutes quota / billing), not the workflow.
 on:
   push:
     branches: [auto/inspiring-gauss-9eryy9]
     paths: [".github/workflows/msys2-diag.yml"]
 
 jobs:
-  diag:
-    runs-on: windows-2025
+  probe:
+    runs-on: ubuntu-latest
     steps:
-      - name: Machine
-        shell: pwsh
-        run: |
-          $cs = Get-CimInstance Win32_ComputerSystem
-          "RAM GB: {0}  logical CPUs: {1}" -f [math]::Round($cs.TotalPhysicalMemory/1GB,1), $cs.NumberOfLogicalProcessors
-          Get-CimInstance Win32_PageFileUsage | Select-Object Name, AllocatedBaseSize | Format-Table
-
-      - name: Where structured output / SARIF is controlled
-        shell: pwsh
-        run: |
-          $root = "C:\Program Files\Microsoft Visual Studio\18\Enterprise\MSBuild\Microsoft\VC\v170"
-          Get-ChildItem $root -Recurse -Include *.targets,*.props -ErrorAction SilentlyContinue |
-            Select-String -Pattern 'Sarif|StructuredOutput|StructuredDiag' -ErrorAction SilentlyContinue |
-            Select-Object -First 60 | ForEach-Object { "{0}:{1}: {2}" -f ($_.Path -replace [regex]::Escape($root),''), $_.LineNumber, $_.Line.Trim() }
-          "--- lines around CppCommon.targets(787)"
-          $t = Join-Path $root "Microsoft.CppCommon.targets"
-          if (Test-Path $t) { Get-Content $t | Select-Object -Skip 775 -First 20 }
+      - run: echo "linux job started"
