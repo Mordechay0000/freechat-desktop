@@ -35,7 +35,7 @@ jobs:
             Select-String -Pattern 'CL_MPCount|MultiProcMaxCount|ProcessorNumber|MultiProcessorCompilation' -ErrorAction SilentlyContinue |
             Select-Object -First 40 | ForEach-Object { "{0}:{1}: {2}" -f ($_.Path -replace [regex]::Escape($root),''), $_.LineNumber, $_.Line.Trim() }
 
-      - name: Try to add a pagefile on D: without a reboot
+      - name: "Try to add a pagefile on D without a reboot"
         shell: pwsh
         run: |
           $before = (Get-CimInstance Win32_OperatingSystem).TotalVirtualMemorySize*1KB/1GB
