@@ -26,6 +26,9 @@ permissions:
 
 jobs:
   build:
+    # A push whose commit message contains [skip-windows] does not start the build,
+    # so scripts and diagnostics can be pushed without paying for hours of Windows.
+    if: ${{ !contains(github.event.head_commit.message, '[skip-windows]') }}
     runs-on: windows-2025
     timeout-minutes: 360          # GitHub's hard ceiling for one job
     env:

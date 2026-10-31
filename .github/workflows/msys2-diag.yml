@@ -1,9 +1,8 @@
 name: msys2-diag
 
-# One-off: Build died with System.OutOfMemoryException inside
-# TrackedVCToolTask.LogSarifOutput (MSBuild parsing the compiler's structured/JSON
-# diagnostics). Which MSBuild property turns structured output off in this Visual
-# Studio, and how much memory does the runner have?
+# One-off, small. (1) Does scripts/build-desktop.ps1 parse in the PowerShell that runs
+# it? (2) Does /p:UseStructuredOutput=false switch off the structured compiler
+# output that made a full build die with OutOfMemoryException?
 on:
   push:
     branches: [auto/inspiring-gauss-9eryy9]
@@ -13,20 +12,32 @@ jobs:
   diag:
     runs-on: windows-2025
     steps:
-      - name: Machine
-        shell: pwsh
-        run: |
-          $cs = Get-CimInstance Win32_ComputerSystem
-          "RAM GB: {0}  logical CPUs: {1}" -f [math]::Round($cs.TotalPhysicalMemory/1GB,1), $cs.NumberOfLogicalProcessors
-          Get-CimInstance Win32_PageFileUsage | Select-Object Name, AllocatedBaseSize | Format-Table
+      - uses: actions/checkout@v4
 
-      - name: Where structured output / SARIF is controlled
+      - name: Syntax of build-desktop.ps1 (PowerShell 7 and Windows PowerShell 5.1)
         shell: pwsh
         run: |
-          $root = "C:\Program Files\Microsoft Visual Studio\18\Enterprise\MSBuild\Microsoft\VC\v170"
-          Get-ChildItem $root -Recurse -Include *.targets,*.props -ErrorAction SilentlyContinue |
-            Select-String -Pattern 'Sarif|StructuredOutput|StructuredDiag' -ErrorAction SilentlyContinue |
-            Select-Object -First 60 | ForEach-Object { "{0}:{1}: {2}" -f ($_.Path -replace [regex]::Escape($root),''), $_.LineNumber, $_.Line.Trim() }
-          "--- lines around CppCommon.targets(787)"
-          $t = Join-Path $root "Microsoft.CppCommon.targets"
-          if (Test-Path $t) { Get-Content $t | Select-Object -Skip 775 -First 20 }
+          $script = Join-Path $PWD 'scripts\build-desktop.ps1'
+          $e = $null
+          [System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$null, [ref]$e) | Out-Null
+          if ($e) { "pwsh 7 parse errors:"; $e | ForEach-Object { "  $($_.Message) at line $($_.Extent.StartLineNumber)" }; exit 1 } else { "pwsh 7: parse ok" }
+          powershell -NoProfile -Command "`$e=`$null; [System.Management.Automation.Language.Parser]::ParseFile('$script',[ref]`$null,[ref]`$e) | Out-Null; if (`$e) { `$e | ForEach-Object { '  ' + `$_.Message + ' at line ' + `$_.Extent.StartLineNumber }; exit 1 } else { 'powershell 5.1: parse ok' }"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Structured output with and without the property
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64 -vcvars_ver=14.44
+          mkdir t && cd t
+          echo cmake_minimum_required(VERSION 3.20) > CMakeLists.txt
+          echo project(t CXX) >> CMakeLists.txt
+          echo add_executable(t a.cpp b.cpp) >> CMakeLists.txt
+          echo int f(); int main(){ return f(); } > a.cpp
+          echo int f(){ int unused; return 0; } > b.cpp
+          cmake -S . -B b
+          echo === DEFAULT ===
+          msbuild b\t.sln /p:Configuration=Release /p:Platform=x64 /t:Rebuild /v:n | findstr /i "structured"
+          echo === UseStructuredOutput=false ===
+          msbuild b\t.sln /p:Configuration=Release /p:Platform=x64 /p:UseStructuredOutput=false /t:Rebuild /v:n | findstr /i "structured"
+          echo === done ===
+          exit /b 0

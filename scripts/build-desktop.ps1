@@ -1002,10 +1002,16 @@ Visual Studio was not found, and it is required to build.
         #
         # Platform is set AFTER vcvarsall, so that prepare.py reads the value this
         # environment actually is, whether or not vcvarsall sets it itself.
+        # Written by the batch file once vcvarsall has succeeded. Without it a failed
+        # STAGE (an hour into prepare, say) was reported as "the Visual Studio
+        # environment could not be initialised", which sent the investigation to the
+        # wrong place every time.
+        $flag = Join-Path ([System.IO.Path]::GetTempPath()) "freechat-vs-ready-$PID.flag"
         $batLines = @(
             '@echo off',
             "call `"$vcvars`" $Arch $sdkArg-vcvars_ver=14.44",
             'if errorlevel 1 exit /b %errorlevel%',
+            "type nul > `"$flag`"",
             "set `"Platform=$Arch`"",
             "set `"$VsReadyVar=1`"",
             "powershell -NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Stage $Stage -Arch $Arch",
@@ -1013,13 +1019,17 @@ Visual Studio was not found, and it is required to build.
         )
         $bat = Join-Path ([System.IO.Path]::GetTempPath()) "freechat-vs-$PID.cmd"
         [System.IO.File]::WriteAllText($bat, (($batLines -join "`r`n") + "`r`n"), [System.Text.Encoding]::ASCII)
+        $envReady = $false
         try {
             & cmd /c "`"$bat`""
             $code = $LASTEXITCODE
+            $envReady = Test-Path $flag
         } finally {
-            Remove-Item -Force $bat -ErrorAction SilentlyContinue
+            Remove-Item -Force $bat, $flag -ErrorAction SilentlyContinue
         }
-        if ($code -ne 0) {
+        if ($code -ne 0 -and $envReady) {
+            Warn "stage $Stage failed for $Arch (exit $code). The Visual Studio environment itself was initialised fine, so the cause is in the output above this line."
+        } elseif ($code -ne 0) {
             Warn "the Visual Studio environment could not be initialised for $Arch (exit $code)."
             if ($Arch -eq 'arm64') {
                 Warn '  For arm64 the "MSVC ARM64 build tools" component must be installed;'
@@ -1353,8 +1363,14 @@ function Invoke-Build {
         # /t:Telegram is "Build Telegram" from upstream's instructions: the app and
         # what it depends on. The whole solution would also build the Updater,
         # the Packer and cmake's ALL_BUILD for nothing a run of the client needs.
-        Say "    $ msbuild $sln /t:Telegram /p:Configuration=Release /p:Platform=$(Get-MsbuildPlatform) /m"
-        & msbuild $sln /t:Telegram /p:Configuration=Release /p:Platform=$(Get-MsbuildPlatform) /m
+        # UseStructuredOutput=false: Visual Studio 18's C++ targets default it to true
+        # (Microsoft.Cpp.VCTools.props), which makes cl report diagnostics as JSON that
+        # MSBuild parses in TrackedVCToolTask.LogSarifOutput. A full Telegram build
+        # died there with System.OutOfMemoryException after 1h50 on a 16GB runner,
+        # with no compiler error at all. The property is only a default ("when
+        # empty"), so passing it turns the path off.
+        Say "    $ msbuild $sln /t:Telegram /p:Configuration=Release /p:Platform=$(Get-MsbuildPlatform) /p:UseStructuredOutput=false /m"
+        & msbuild $sln /t:Telegram /p:Configuration=Release /p:Platform=$(Get-MsbuildPlatform) /p:UseStructuredOutput=false /m
         if ($LASTEXITCODE -ne 0) { Die 'msbuild failed' }
         Log "result under $Up\out\Release"
     } else {
