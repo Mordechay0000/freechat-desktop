@@ -35,9 +35,17 @@ jobs:
           echo int f(); int main(){ return f(); } > a.cpp
           echo int f(){ int unused; return 0; } > b.cpp
           cmake -S . -B b
-          echo === DEFAULT ===
-          msbuild b\t.sln /p:Configuration=Release /p:Platform=x64 /t:Rebuild /v:n | findstr /i "structured"
-          echo === UseStructuredOutput=false ===
-          msbuild b\t.sln /p:Configuration=Release /p:Platform=x64 /p:UseStructuredOutput=false /t:Rebuild /v:n | findstr /i "structured"
+          dir b\*.sln b\*.slnx b\*.vcxproj
+          where msbuild
+          echo === DEFAULT: msbuild output ===
+          msbuild b\t.vcxproj /p:Configuration=Release /p:Platform=x64 /t:Rebuild /v:d > default.log 2>&1
+          echo exit=%errorlevel%
+          findstr /i /c:"structured" /c:"MSB8085" /c:"error" default.log
+          echo === UseStructuredOutput=false: msbuild output ===
+          msbuild b\t.vcxproj /p:Configuration=Release /p:Platform=x64 /p:UseStructuredOutput=false /t:Rebuild /v:d > off.log 2>&1
+          echo exit=%errorlevel%
+          findstr /i /c:"structured" /c:"MSB8085" /c:"error" off.log
+          echo === line counts ===
+          find /c /v "" default.log off.log
           echo === done ===
           exit /b 0
