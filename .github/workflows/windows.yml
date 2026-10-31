@@ -61,6 +61,21 @@ jobs:
         working-directory: D:\fc
         run: powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage install -Arch $env:ARCH
 
+      # The image has a 2.9GB pagefile, i.e. ~19GB of commit for RAM + pagefile. A full
+      # Build died with C3859/C1076 (compiler out of virtual memory for the PCH). A paging
+      # file can be added while Windows runs: measured on this image, the commit limit
+      # went from 18.9GB to 42.9GB within seconds, no reboot. Best effort: if it fails
+      # the build still runs, as before.
+      - name: More virtual memory (24GB pagefile on D)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $before = (Get-CimInstance Win32_OperatingSystem).TotalVirtualMemorySize*1KB/1GB
+          New-CimInstance -ClassName Win32_PageFileSetting -Property @{ Name = 'D:\extra-pagefile.sys'; InitialSize = [uint32]24576; MaximumSize = [uint32]24576 } -ErrorAction Stop | Out-Null
+          Start-Sleep -Seconds 5
+          $after = (Get-CimInstance Win32_OperatingSystem).TotalVirtualMemorySize*1KB/1GB
+          "commit limit: {0:N1} GB -> {1:N1} GB" -f $before, $after
+
       # Informational: it reports "prepared Qt missing" as a blocking problem before
       # prepare has run, which is the expected state here.
       - name: Doctor
@@ -92,6 +107,11 @@ jobs:
 
       - name: Build
         working-directory: D:\fc
+        env:
+          # 4 cores: 2 projects x 2 compilers = at most 4 cl.exe at once (it was 4 x 4).
+          # The machine is CPU-bound anyway, so this costs little time.
+          FREECHAT_MSBUILD_NODES: "2"
+          FREECHAT_CL_MP: "2"
         run: powershell -ExecutionPolicy Bypass -File scripts\build-desktop.ps1 -Stage build -Arch $env:ARCH
 
       - name: Package

@@ -1369,8 +1369,22 @@ function Invoke-Build {
         # died there with System.OutOfMemoryException after 1h50 on a 16GB runner,
         # with no compiler error at all. The property is only a default ("when
         # empty"), so passing it turns the path off.
-        Say "    $ msbuild $sln /t:Telegram /p:Configuration=Release /p:Platform=$(Get-MsbuildPlatform) /p:UseStructuredOutput=false /m"
-        & msbuild $sln /t:Telegram /p:Configuration=Release /p:Platform=$(Get-MsbuildPlatform) /p:UseStructuredOutput=false /m
+        #
+        # How many compilers run at once. By default everything the machine has: msbuild
+        # /m starts one node per core, and every node's cl.exe /MP starts one compiler
+        # per core again, each holding Telegram's large precompiled header. On a
+        # 4-core, 16GB runner that gave 313 x C3859 "Failed to create virtual memory
+        # for PCH" / C1076 "internal heap limit reached" after an hour. Both limits are
+        # opt-in through the environment, so a developer machine keeps full speed:
+        #   FREECHAT_MSBUILD_NODES=N   msbuild /m:N   (projects built at once)
+        #   FREECHAT_CL_MP=N           /p:CL_MPCount=N (compilers per project; the
+        #                              property Microsoft.Cl.Common.props maps to /MP:N)
+        $nodes = '/m'
+        if ($env:FREECHAT_MSBUILD_NODES -match '^\d+$') { $nodes = "/m:$($env:FREECHAT_MSBUILD_NODES)" }
+        $msbuildArgs = @($sln, '/t:Telegram', '/p:Configuration=Release', "/p:Platform=$(Get-MsbuildPlatform)", '/p:UseStructuredOutput=false', $nodes)
+        if ($env:FREECHAT_CL_MP -match '^\d+$') { $msbuildArgs += "/p:CL_MPCount=$($env:FREECHAT_CL_MP)" }
+        Say "    $ msbuild $($msbuildArgs -join ' ')"
+        & msbuild @msbuildArgs
         if ($LASTEXITCODE -ne 0) { Die 'msbuild failed' }
         Log "result under $Up\out\Release"
     } else {
