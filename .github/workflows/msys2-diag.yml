@@ -1,0 +1,57 @@
+name: msys2-diag
+
+# One-off. A full Build failed with 313 x (C3859 "Failed to create virtual memory for
+# PCH", C1076 "internal heap limit reached"); the build before it died with
+# OutOfMemoryException in MSBuild. Both look like memory pressure under /m + /MP.
+# (1) What limits how many cl.exe run at once? (2) Can the commit limit (RAM +
+# pagefile) be raised on the runner without a reboot?
+on:
+  push:
+    branches: [auto/inspiring-gauss-9eryy9]
+    paths: [".github/workflows/msys2-diag.yml"]
+
+jobs:
+  diag:
+    runs-on: windows-2025
+    steps:
+      - name: Memory now
+        shell: pwsh
+        run: |
+          function Show-Mem {
+            $cs = Get-CimInstance Win32_ComputerSystem
+            $os = Get-CimInstance Win32_OperatingSystem
+            "RAM GB: {0}  commit limit GB (RAM+pagefile): {1}  free virtual GB: {2}" -f [math]::Round($cs.TotalPhysicalMemory/1GB,1), [math]::Round(($os.TotalVirtualMemorySize*1KB)/1GB,1), [math]::Round(($os.FreeVirtualMemory*1KB)/1GB,1)
+            Get-CimInstance Win32_PageFileUsage | Select-Object Name, AllocatedBaseSize | Format-Table | Out-String
+            "AutomaticManagedPagefile: " + $cs.AutomaticManagedPagefile
+            "disk free GB D: " + [math]::Round((Get-PSDrive D).Free/1GB,1) + "  C: " + [math]::Round((Get-PSDrive C).Free/1GB,1)
+          }
+          Show-Mem
+
+      - name: What limits parallel cl.exe (MSBuild properties)
+        shell: pwsh
+        run: |
+          $root = "C:\Program Files\Microsoft Visual Studio\18\Enterprise\MSBuild\Microsoft\VC\v170"
+          Get-ChildItem $root -Recurse -Include *.targets,*.props -ErrorAction SilentlyContinue |
+            Select-String -Pattern 'CL_MPCount|MultiProcMaxCount|ProcessorNumber|MultiProcessorCompilation' -ErrorAction SilentlyContinue |
+            Select-Object -First 40 | ForEach-Object { "{0}:{1}: {2}" -f ($_.Path -replace [regex]::Escape($root),''), $_.LineNumber, $_.Line.Trim() }
+
+      - name: Try to add a pagefile on D: without a reboot
+        shell: pwsh
+        run: |
+          $before = (Get-CimInstance Win32_OperatingSystem).TotalVirtualMemorySize*1KB/1GB
+          "commit limit before: {0:N1} GB" -f $before
+          try {
+            # A new paging file can be created while Windows is running; this uses the
+            # same documented Win32_PageFileSetting + SetPageFile route the installers use.
+            $cs = Get-CimInstance Win32_ComputerSystem
+            if ($cs.AutomaticManagedPagefile) { Set-CimInstance -InputObject $cs -Property @{AutomaticManagedPagefile=$false} }
+            $existing = Get-CimInstance Win32_PageFileSetting -ErrorAction SilentlyContinue
+            "existing settings: " + (($existing | ForEach-Object { $_.Name + ' ' + $_.InitialSize + '-' + $_.MaximumSize }) -join '; ')
+            New-CimInstance -ClassName Win32_PageFileSetting -Property @{ Name = 'D:\extra-pagefile.sys'; InitialSize = [uint32]24576; MaximumSize = [uint32]24576 } -ErrorAction Stop | Out-Null
+            "created Win32_PageFileSetting D:\extra-pagefile.sys 24GB"
+          } catch { "failed: " + $_.Exception.Message }
+          Start-Sleep -Seconds 5
+          $after = (Get-CimInstance Win32_OperatingSystem).TotalVirtualMemorySize*1KB/1GB
+          "commit limit after: {0:N1} GB" -f $after
+          Get-CimInstance Win32_PageFileUsage | Select-Object Name, AllocatedBaseSize | Format-Table | Out-String
+          if ($after -le $before + 1) { "=> no effect without a reboot" } else { "=> effective immediately" }
