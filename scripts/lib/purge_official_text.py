@@ -90,11 +90,33 @@ def process_android(text, rewrite):
     return TEXT_NODE.sub(lambda m: ">" + rewrite(m.group(1)) + "<", text)
 
 
+# A desktop string's {name} is a PLACEHOLDER, not text: lang.strings "Hide {telegram}"
+# generates the C++ tag lt_telegram, and the code calls
+# tr::lng_mac_menu_hide_telegram(tr::now, lt_telegram, ...). Rewriting the word inside
+# the braces gave {FreeChat}, a tag lt_FreeChat, and a Windows build that compiled for
+# two hours and then failed with C2065 'lt_telegram': undeclared identifier. Only the
+# words around a placeholder are text.
+PLACEHOLDER_RE = re.compile(r"\{[A-Za-z0-9_]+\}")
+
+
+def rewrite_outside_placeholders(rewrite, value):
+    held = []
+
+    def hold(m):
+        held.append(m.group(0))
+        # \x00 is in no brand pattern and no technical-id pattern, so rewrite() leaves it be.
+        return "\x00%d\x00" % (len(held) - 1)
+
+    protected = PLACEHOLDER_RE.sub(hold, value)
+    result = rewrite(protected)
+    return re.sub(r"\x00(\d+)\x00", lambda m: held[int(m.group(1))], result)
+
+
 def process_desktop(text, rewrite):
     out = []
     for line in text.split("\n"):
         m = LANG_LINE.match(line)
-        out.append(m.group(1) + rewrite(m.group(2)) + m.group(3) if m else line)
+        out.append(m.group(1) + rewrite_outside_placeholders(rewrite, m.group(2)) + m.group(3) if m else line)
     return "\n".join(out)
 
 
@@ -109,8 +131,10 @@ def remaining(path, platform):
     else:
         for line in text.split("\n"):
             m = LANG_LINE.match(line)
-            if m and (BRAND_RE.search(m.group(2)) or HTTP_HOST_RE.search(m.group(2))):
-                n += 1
+            if m:
+                value = PLACEHOLDER_RE.sub("", m.group(2))
+                if BRAND_RE.search(value) or HTTP_HOST_RE.search(value):
+                    n += 1
     return n
 
 

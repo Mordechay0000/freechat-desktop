@@ -335,7 +335,8 @@ if [[ -f "$ROOT/scripts/lib/purge_official_text.py" ]]; then
   pot="$TMP/pot"; rm -rf "$pot"; mkdir -p "$pot"
   mkdir -p "$pot/Telegram/Resources/langs"
   printf '%s\n' '/* Telegram header comment */' '"lng_telegram_faq" = "Telegram FAQ, see https://telegram.org/faq or t.me/x";' \
-    '"lng_plain" = "Nothing here";' > "$pot/Telegram/Resources/langs/lang.strings"
+    '"lng_plain" = "Nothing here";' '"lng_mac_menu_hide_telegram" = "Hide {telegram}";' \
+    '"lng_mixed" = "{telegram} said Telegram";' > "$pot/Telegram/Resources/langs/lang.strings"
   pot_file="$pot/Telegram/Resources/langs/lang.strings"; pot_plat=desktop
   if py_run "$ROOT/scripts/lib/purge_official_text.py" "$pot_plat" "$pot" Acme https://acme.test >/dev/null 2>&1; then
     if grep -q 'Acme FAQ, see https://acme.test/faq or acme.test/x' "$pot_file" \
@@ -343,6 +344,15 @@ if [[ -f "$ROOT/scripts/lib/purge_official_text.py" ]]; then
       ok "official name and hosts rewritten in values, resource keys kept"
     else
       bad "purge_official_text.py: wrong result: $(cat "$pot_file" | tr '\n' ' ')"
+    fi
+    # {telegram} is a PLACEHOLDER: lang.strings turns it into the C++ tag lt_telegram, which
+    # the code uses. Rewriting it gave {Acme}/lt_Acme and a Windows build that compiled for
+    # two hours and then failed with C2065 'lt_telegram': undeclared identifier.
+    if grep -q '"lng_mac_menu_hide_telegram" = "Hide {telegram}";' "$pot_file" \
+       && grep -q '"lng_mixed" = "{telegram} said Acme";' "$pot_file"; then
+      ok "placeholder names ({telegram}) are kept, the words around them are rewritten"
+    else
+      bad "purge_official_text.py rewrote a {placeholder}: $(grep -n 'lng_mac_menu_hide_telegram\|lng_mixed' "$pot_file" | tr '\n' ' ')"
     fi
     cp "$pot_file" "$pot/first"
     py_run "$ROOT/scripts/lib/purge_official_text.py" "$pot_plat" "$pot" Acme https://acme.test >/dev/null 2>&1
